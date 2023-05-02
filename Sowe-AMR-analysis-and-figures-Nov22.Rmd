@@ -1,0 +1,3323 @@
+---
+title: "Sowe AMR analysis and figures November 2022"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+fig_width: 10
+fig_height: 10
+---
+
+```{R, results='hide', fig.keep='all', message=FALSE}
+library(reticulate)
+library(ALDEx2)
+library(Maaslin2)
+library(ape)
+library(dplyr)
+library(exactRankTests)
+library(ggplot2)
+library(ggnewscale)
+library(nlme)
+library(philr)
+library(phyloseq)
+library(reticulate)
+library(vegan)
+library(compositions)
+conda_python(envname = 'r-reticulate', conda = "auto")
+```
+
+```{python, results='hide', fig.keep='all', include=FALSE}
+import os
+import pandas as pd
+import pickle
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from matplotlib.patches import Ellipse
+import matplotlib.transforms as transforms
+from matplotlib.offsetbox import AnchoredText
+import matplotlib.patches as mpatches
+import matplotlib.colors as colors
+import numpy as np
+from numpy.linalg import norm
+from scipy.spatial import distance
+from scipy.stats import ttest_ind
+import scipy.spatial.distance as ssd
+from scipy.cluster import hierarchy
+from scipy.interpolate import interp1d
+from skbio.stats.composition import clr
+from skbio.stats import ordination
+from skbio.diversity import alpha_diversity
+from bioinfokit.analys import stat
+from skbio import diversity
+from skbio.diversity import beta_diversity
+from skbio.stats.distance import mantel
+from deicode.preprocessing import rclr
+from Bio import Phylo
+from skbio.tree import TreeNode
+from skbio import read
+from ete3 import Tree
+from matplotlib.offsetbox import AnchoredText
+
+folder = '/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/'
+analysis_folder = folder+'analysis/'
+kraken_folder = folder+'kraken2_kreport/'
+card_folder = folder+'CARD_annotations/'
+pf_folder = '/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/PathoFact_report/'
+amr_folder, tox_gene_folder, tox_pred_folder, vir_pred_folder, complete_folder = 'AMR_MGE/', 'Toxin_gene_library/', 'Toxin_prediction/', 'Virulence_prediction/', 'complete/'
+save_folder = '/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/'
+
+samples = ['D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12']
+sample_type = {'D7':'LDPE', 'D8':'LDPE', 'D9':'LDPE', 'D4':'W-LDPE', 'D5':'W-LDPE', 'D6':'W-LDPE', 'D1':'Wood', 'D2':'Wood', 'D3':'Wood', 'D10':'Water', 'D11':'Water', 'D12':'Water'}
+sample_color = {'LDPE':'#2E86C1', 'Weathered LDPE':'#8E44AD', 'W-LDPE':'#8E44AD','Wood':'#CB4335', 'Water':'#F1C40F'}
+material_order = ['LDPE', 'W-LDPE', 'Wood', 'Water']
+order = material_order
+sample_order_overall = ['D7', 'D8', 'D9', 'D4', 'D5', 'D6', 'D1', 'D2', 'D3', 'D10', 'D11', 'D12']
+```
+
+# Import and reformat data
+
+## Classified reads
+
+Do this part on the server and just add to the next chunk:
+```{bash, eval=FALSE}
+for i in joined_reads/* ; do echo $(zcat ${i} | wc -l)/4|bc ; done
+for i in Sowe/*.fq.gz ; do echo $(zcat ${i} | wc -l)/4|bc ; done
+```
+
+Combine with Kraken and CARD classifications:
+```{python, results='hide', fig.keep='all', eval=FALSE}
+#kneaddata
+initial, after_knead = {'D1':69401246+69401246, 'D2':79213174+79213174, 'D3':70529765+70529765, 'D4':80327001+80327001, 'D5':84485091+84485091, 'D6':5207043+64576136+5207043+64576136, 'D7':88824725+88824725, 'D8':19093800+57219125+19093800+57219125, 'D9':70622173+70622173, 'D10':95924462+95924462, 'D11':9466307+61912021+9466307+61912021, 'D12':80332200+80332200}, {'D1':138462592, 'D2':158025064, 'D3':140676394, 'D4':160290498, 'D5':168632484, 'D6':128901970, 'D7':177269742, 'D8':114203296, 'D9':141021962, 'D10':191558876, 'D11':123463454, 'D12':160311510}
+
+#kraken
+percent_krak, reads_krak = {}, {}
+for file in os.listdir(kraken_folder):
+  if '0.3' not in file: continue
+  if file[-8:] == '.kreport' and 'bracken' not in file:
+    f = pd.read_csv(kraken_folder+file, index_col=None, header=None, sep='\t')
+    perc, reads = f.loc[0, 0], f.loc[0, 1]
+    fn = file.split('_')[0]
+    percent_krak[fn] = 100-perc
+    reads_krak[fn] = initial[fn]-reads
+
+#card
+percent_card, reads_card = {}, {}
+for file in os.listdir(card_folder):
+  if 'overall_mapping_stats' in file:
+    f = pd.read_csv(card_folder+file, index_col=None, header=3, sep='\t')
+    fn = file.split('_')[0]
+    for row in f.index.values:
+      if 'Mapped' in row:
+        reads = float(row.split(' ')[-1])
+        perc = f.loc[row, :].values[0]
+        perc = float(perc.replace('(', '').replace(')', '').replace('%', ''))
+        percent_card[fn] = perc
+        reads_card[fn] = reads
+
+combined = []
+lists = [initial, after_knead, reads_krak, reads_card]
+for l in lists:
+  this_list = []
+  for sample in samples:
+    this_list.append(l[sample])
+  combined.append(this_list)
+
+all_reads = pd.DataFrame(combined, columns=samples, index=['Initial', 'After Kneaddata', 'Kraken2', 'CARD'])
+all_reads.to_csv(folder+'analysis/reads_summary.csv')
+```
+
+## Kraken
+
+This section groups together the Bracken output for the runs with a confidence threshold of 0.3, gets the NCBI taxonomy ID and full taxonomy for each species name and also removes taxa without at least 10 reads and that are present in at least 3 samples. It also gets the GTDB taxonomy for the taxa that are present in that database. 
+
+Get GTDB taxonomy:
+```{python, results='hide', fig.keep='all', eval=FALSE}
+gtdb_taxonomy = {}
+gtdb = ['ar53_metadata_r207.tsv', 'bac120_metadata_r207.tsv']
+for f in gtdb:
+  file = pd.read_csv(folder+'GTDB_r207/'+f, index_col=0, header=0, sep='\t')
+  for row in file.index.values:
+      species_taxid, taxid = file.loc[row, 'ncbi_species_taxid'], file.loc[row, 'ncbi_taxid']
+      gtdb_tax_str = file.loc[row, 'gtdb_taxonomy']
+      gtdb_taxonomy[species_taxid] = gtdb_tax_str
+      gtdb_taxonomy[taxid] = gtdb_tax_str
+
+with open(analysis_folder+'ncbi_taxid_to_gtdb_taxonomy.dict', 'wb') as f:
+    pickle.dump(gtdb_taxonomy, f)
+```
+
+Do everything else:
+```{python, results='hide', fig.keep='all', eval=FALSE}
+files = os.listdir(kraken_folder)
+bracken = []
+sp_name_to_tax = {}
+sp_name_to_taxid = {}
+
+with open(analysis_folder+'ncbi_taxid_to_gtdb_taxonomy.dict', 'rb') as f:
+    gtdb_taxonomy = pickle.load(f)
+
+for f in files:
+  if '0.3' not in f: continue
+  if '.bracken' in f:
+    file = pd.read_csv(kraken_folder+f, index_col=0, header=0, sep='\t')
+    file = file.loc[:, ['new_est_reads']]
+    file = file.rename(columns={'new_est_reads':f.split('_')[0]})
+    if isinstance(bracken, list):
+      bracken = file.copy(deep=True)
+    else:
+      bracken = pd.concat([bracken, file]).fillna(value=0)
+      bracken = bracken.groupby(by=bracken.index, axis=0).sum()
+  elif '_bracken.kreport' in f:
+    levels_taxonomy = {}
+    for row in open(kraken_folder+f, 'r'):
+      row = row.replace('\n', '').split('\t')
+      row[-1] = row[-1].strip()
+      levels_taxonomy[row[3]] = row[5]
+      if row[3] == 'S':
+        if row[5] in sp_name_to_tax: continue
+        sp_name_to_taxid[row[5]] = row[4]
+        this_tax = []
+        for lvl in ['D', 'P', 'C', 'O', 'F', 'G']:
+          try: this_tax.append(levels_taxonomy[lvl])
+          except: this_tax.append('')
+        this_tax_str = '; '.join(this_tax)
+        sp_name_to_tax[row[5]] = this_tax_str
+      
+bracken['Full NCBI taxonomy'] = ''
+bracken['NCBI taxid'] = ''
+bracken['Full GTDB taxonomy'] = ''
+for sp in bracken.index.values:
+  bracken.loc[sp, 'Full NCBI taxonomy'] = sp_name_to_tax[sp]
+  bracken.loc[sp, 'NCBI taxid'] = sp_name_to_taxid[sp]
+  try:
+    bracken.loc[sp, 'Full GTDB taxonomy'] = gtdb_taxonomy[int(sp_name_to_taxid[sp])]
+  except:
+    do_nothing = True
+
+bracken = bracken.loc[:, ['Full NCBI taxonomy', 'NCBI taxid', 'Full GTDB taxonomy']+samples]
+bracken.to_csv(analysis_folder+'bracken_unfiltered.csv')
+
+bracken = bracken.drop(['Full NCBI taxonomy', 'NCBI taxid', 'Full GTDB taxonomy'], axis=1)
+bracken = bracken[bracken.max(axis=1) > 10]
+prevalence = bracken.copy(deep=True)
+prevalence[prevalence > 0] = 1
+prevalence = prevalence[prevalence.sum(axis=1) > 2]
+bracken = bracken.loc[prevalence.index.values, :]
+
+bracken['Full NCBI taxonomy'] = ''
+bracken['NCBI taxid'] = ''
+bracken['Full GTDB taxonomy'] = ''
+for sp in bracken.index.values:
+  bracken.loc[sp, 'Full NCBI taxonomy'] = sp_name_to_tax[sp]
+  bracken.loc[sp, 'NCBI taxid'] = sp_name_to_taxid[sp]
+  try:
+    bracken.loc[sp, 'Full GTDB taxonomy'] = gtdb_taxonomy[int(sp_name_to_taxid[sp])]
+  except:
+    do_nothing = True
+
+bracken = bracken.loc[:, ['Full NCBI taxonomy', 'NCBI taxid', 'Full GTDB taxonomy']+samples]
+bracken.to_csv(analysis_folder+'bracken_filtered.csv')
+```
+
+## CARD
+
+```{python, results='hide', fig.keep='all', eval=FALSE}
+all_card = []
+names = ['ARO Accession', 'Resistomes & Variants: Observed Pathogen(s)', 'AMR Gene Family', 'Drug Class', 'Resistance Mechanism']
+all_card, all_info = [], []
+cooccurrence = {}
+for file in os.listdir(card_folder):
+  if 'gene_mapping_data' in file:
+    card = pd.read_csv(card_folder+file, sep='\t', index_col=0, header=0)
+    sample = card.loc[:, ['Completely Mapped Reads']].rename(columns={'Completely Mapped Reads':file.split('_')[0]})
+    information = card.loc[:, names]
+    all_card.append(sample)
+    all_info.append(information)
+    for row in card.index.values:
+      if isinstance(card.loc[row, 'Mate Pair Linkage (# reads)'], str):
+        cooccurrence[row] = card.loc[row, 'Mate Pair Linkage (# reads)'].split('(')[0]
+
+all_card = pd.concat(all_card).fillna(value=0)
+all_card = all_card.groupby(by=all_card.index, axis=0).sum()
+all_card = all_card.loc[:, samples]
+all_card.to_csv(folder+'analysis/card_annotations.csv')
+
+all_info = pd.concat(all_info)
+all_info = all_info.drop_duplicates()
+all_info.to_csv(folder+'analysis/card_information.csv')
+```
+
+Note that card_information_edit was made manually from card_information and then was further edited by Vinko to card_information_edit_VZ2.
+
+```{python}
+card = pd.read_csv(folder+'analysis/card_annotations.csv', index_col=0, header=0)
+card = card[card.max(axis=1) > 10]
+prevalence = card.copy(deep=True)
+prevalence[prevalence > 0] = 1
+prevalence = prevalence[prevalence.sum(axis=1) > 2]
+card = card.loc[prevalence.index.values, :]
+card.to_csv(folder+'analysis/card_annotations_filtered.csv')
+
+info = pd.read_csv(folder+'analysis/card_information_edit_VZ2.csv', index_col=0, header=0)
+rename_info = {}
+for row in card.index.values:
+  rename_info[row] = info.loc[row, 'Drug Class Consolidated']
+
+card = card.rename(index=rename_info)
+
+card_classes_total = list(card.index.values)
+card_classes_unique = set(card_classes_total)
+classes_count = {}
+for unique_class in card_classes_unique:
+  classes_count[unique_class] = card_classes_total.count(unique_class)
+
+card = card.groupby(by=card.index, axis=0).sum()
+card.to_csv(folder+'analysis/card_annotations_broad_consolidated.csv')
+
+```
+
+Get file for supplementary:
+```{python}
+initial_reads = {'D1':69401246+69401246, 'D2':79213174+79213174, 'D3':70529765+70529765, 'D4':80327001+80327001, 'D5':84485091+84485091, 'D6':5207043+64576136+5207043+64576136, 'D7':88824725+88824725, 'D8':19093800+57219125+19093800+57219125, 'D9':70622173+70622173, 'D10':95924462+95924462, 'D11':9466307+61912021+9466307+61912021, 'D12':80332200+80332200}
+
+card = pd.read_csv(folder+'analysis/card_annotations.csv', index_col=0, header=0)
+info = pd.read_csv(folder+'analysis/card_information_edit_VZ2.csv', index_col=0, header=0)
+card_all = card.copy(deep=True)
+card = card[card.max(axis=1) > 10]
+abundance = card.copy(deep=True)
+prevalence = card.copy(deep=True)
+prevalence[prevalence > 0] = 1
+prevalence = prevalence[prevalence.sum(axis=1) > 2]
+card_all['Removed'] = ''
+for row in card_all.index:
+  if row in prevalence.index:
+    card_all.loc[row, 'Removed'] = 'No'
+  elif row in abundance.index:
+    card_all.loc[row, 'Removed'] = 'Removed due to low prevalence (<10 reads in highest sample)'
+  else:
+    card_all.loc[row, 'Removed'] = 'Removed due to low prevalence (present in <3 samples)'
+
+card2 = card_all.copy(deep=True).drop(['Removed'], axis=1)
+card2_reads = card2.copy(deep=True)
+
+for sample in initial_reads:
+  scale = initial_reads[sample]/1000000
+  card2[sample] = card2[sample]/scale
+
+info = info.loc[:, ['ARO Accession', 'Resistomes & Variants: Observed Pathogen(s)', 'AMR Gene Family', 'Resistance Mechanism', 'Drug Class', 'Drug Class Consolidated']]
+reads_rename, rpm_rename = {}, {}
+for col in card2_reads.columns:
+  reads_rename[col] = col+' reads'
+  rpm_rename[col] = col+' RPM'
+card2 = card2.rename(columns=rpm_rename)
+card_all = card_all.rename(columns=reads_rename)
+
+combined = pd.concat([card_all, card2]).fillna(value=0)
+combined = combined.groupby(by=combined.index, axis=0).sum()
+combined['Removed'] = card_all['Removed']
+info = info.loc[combined.index, :]
+for col in ['ARO Accession', 'Resistomes & Variants: Observed Pathogen(s)', 'AMR Gene Family', 'Resistance Mechanism', 'Drug Class', 'Drug Class Consolidated']:
+  combined[col] = info[col]
+
+combined.to_csv(folder+'analysis/card_annotations_abundance_for_supplementary.csv')
+```
+
+Further edit to remove mutations:
+```{python}
+combined = pd.read_csv(folder+'analysis/card_annotations_abundance_for_supplementary.csv', index_col=0, header=0)
+final_used = pd.read_csv(folder+'analysis/card_drug_reduced/card_annotations_filtered_RPM_no_mutation_edit.csv', index_col=0, header=0)
+
+for row in combined.index.values:
+  if combined.loc[row, 'Removed'] == 'No':
+    if row not in final_used.index.values:
+      combined.loc[row, 'Removed'] = 'Removed due to being a mutation/species-specific resistance'
+
+combined.to_csv(folder+'analysis/card_annotations_abundance_for_supplementary_no_mutation.csv')
+```
+
+## Get tree
+
+Get list of taxid's:
+```{python, eval=FALSE}
+bracken = pd.read_csv(folder+'analysis/bracken_filtered.csv', index_col=2, header=0)
+
+with open(folder+'analysis/taxid_list.txt', 'w') as f:
+  for row in bracken.index.values:
+    w = f.write(str(row)+'\n')
+```
+Using [PhyloT](https://phylot.biobyte.de/index.cgi) and saving the resulting tree as PhyloT_V205_tree.txt (newick).
+
+Sort tree:
+```{python, eval=FALSE}
+with open(folder+'analysis/taxid_list.txt', "r") as f:
+    tax_str = ''
+    for row in f.read():
+      tax_str += row
+tax_str = tax_str.split('\n')
+tax_id = set([str(tax) for tax in tax_str])
+tree = Tree(folder+'analysis/PhyloT_V205_tree.txt', format=1)
+
+# get a list of all names as well as which of these are internal nodes and rename the internal nodes that have 'INT' in the node name to remove this 'INT'
+names = []
+internals = []
+for node in tree.traverse("postorder"):
+    if 'INT' in node.name:
+        node.name = node.name.split('INT')[1]
+        internals.append(node.name)
+    names.append(node.name)
+names = set(names)
+internals = set(internals)
+internals = set([tax for tax in tax_id if tax in internals])
+
+# save object with dictionary of merged tax ID's and tax ID's not present in the database
+not_in_tree = [tax for tax in tax_id if tax not in names]
+names, sp_names = {}, []
+for tid in bracken.index.values:
+  if str(tid) in not_in_tree:
+    names[tid] = bracken.loc[tid, 'name']
+    sp_names.append(bracken.loc[tid, 'name'])
+    
+with open(folder+'analysis/remove_taxid_species_name.list', 'wb') as f:
+    pickle.dump([not_in_tree, sp_names], f)
+
+print(names)
+```
+This tree was missing 27 taxonomy ID's - probably they have been merged with something new, so we're going to look these up and then replace them in the original list before re-making the tree. As there aren't too many I'm just doing this manually (this also allows me to get any change to the species name and full taxonomy at the same time).
+
+```{python, eval=FALSE}
+old_ids = {2696476: 'Acinetobacter pullorum', 2721621: 'Caproiciproducens sp. 7D4C2', 2825885: 'Collimonas sp. RXD172-2', 1182571: 'Deinococcus swuensis', 2692171: 'Duganella sp. FT134W', 2692174: 'Duganella sp. FT94W', 2692178: 'Duganella sp. FT9W', 1789004: 'Ferrovum sp. Z-31', 2764719: 'Flavobacterium sp. F-408', 2594434: 'Flavobacterium sp. GSP39', 2594431: 'Flavobacterium sp. LB3P62', 1278819: 'Flavobacterium spartansii', 1730500: 'Modestobacter sp. CPCC 205251', 2052837: 'Neisseriaceae bacterium DSM 100970', 2760833: 'Nocardioides sp. 1598', 2572196: 'Pedobacter sp. RP-1-16', 1960920: 'Pseudomonas sp. Ep R1', 2579924: 'Pseudomonas sp. MY101', 2806599: 'Pseudomonas sp. RDP1', 404584: 'Pseudomonas sp. V1', 550710: 'Pseudomonas sp. W15Feb18', 2722818: 'Rhizobium sp. S2', 1049584: 'Rhodococcus enclensis', 2109322: 'Rhodoferax sp. OTU1', 2660640: 'Rugamonas sp. FT103W', 2660639: 'Rugamonas sp. FT29W', 2828730: 'Undibacterium sp. BYS50W'}
+
+new_ids = {2696476: ['Acinetobacter portensis', 1839785, 'Bacteria; Proteobacteria; Gammaproteobacteria; Moraxellales; Moraxellaceae; Acinetobacter'], 2721621: ['Caproicibacter fermentans', 2576756, 'Bacteria; Firmicutes; Clostridia; Eubacteriales; Oscillospiraceae; Caproicibacter'], 2825885: ['Collimonas humicola', 2825886, 'Bacteria; Proteobacteria; Betaproteobacteria; Burkholderiales; Oxalobacteraceae; Collimonas'], 1182571: ['Deinococcus radiopugnans', 57497, 'Bacteria; Deinococcus-Thermus; Deinococci; Deinococcales; Deinococcaceae; Deinococcus'], 2692171: ['Duganella margarita', 2692170, 'Bacteria; Proteobacteria; Betaproteobacteria; Burkholderiales; Oxalobacteraceae; Duganella'], 2692174: ['Duganella lactea', 2692173, 'Bacteria; Proteobacteria; Betaproteobacteria; Burkholderiales; Oxalobacteraceae; Duganella'], 2692178: ['Duganella alba', 2666081, 'Bacteria; Proteobacteria; Betaproteobacteria; Burkholderiales; Oxalobacteraceae; Duganella'], 1789004: ['Ferrovum myxofaciens', 416213, 'Bacteria; Proteobacteria; Betaproteobacteria; Ferrovales; Ferrovaceae; Ferrovum'], 2764719: ['Flavobacterium bernardetii', 2813823, 'Bacteria; Bacteroidetes; Flavobacteriia; Flavobacteriales; Flavobacteriaceae; Flavobacterium'], 2594434: ['Flavobacterium gawalongense', 2594432, 'Bacteria; Bacteroidetes; Flavobacteriia; Flavobacteriales; Flavobacteriaceae; Flavobacterium'], 2594431: ['Flavobacterium franklandianum', 2594430, 'Bacteria; Bacteroidetes; Flavobacteriia; Flavobacteriales; Flavobacteriaceae; Flavobacterium'], 1278819: ['Flavobacterium tructae', 1114873, 'Bacteria; Bacteroidetes; Flavobacteriia; Flavobacteriales; Flavobacteriaceae; Flavobacterium'], 2052837: ['Aquella oligotrophica', 2067065, 'Bacteria; Proteobacteria; Betaproteobacteria; Neisseriales; Neisseriaceae; Aquella'], 2760833: ['Nocardioides lijunqiniae', 2760832, 'Bacteria; Actinobacteria; Actinomycetia; Propionibacteriales; Nocardioidaceae; Nocardioides'], 2572196: ['Pedobacter hiemivivus', 2530454, 'Bacteria; Bacteroidetes; Sphingobacteriia; Sphingobacteriales; Sphingobacteriaceae; Pedobacter'], 1960920: ['Pseudomonas ogarae', 1114970, 'Bacteria; Proteobacteria; Gammaproteobacteria; Pseudomonadales; Pseudomonadaceae; Pseudomonas'], 2579924: ['Pseudomonas yangonensis', 2579922, 'Bacteria; Proteobacteria; Gammaproteobacteria; Pseudomonadales; Pseudomonadaceae; Pseudomonas'], 2806599: ['Pseudomonas ogarae', 1114970, 'Bacteria; Proteobacteria; Gammaproteobacteria; Pseudomonadales; Pseudomonadaceae; Pseudomonas'], 404584: ['Pseudomonas arcuscaelestis', 2710591, 'Bacteria; Proteobacteria; Gammaproteobacteria; Pseudomonadales; Pseudomonadaceae; Pseudomonas'], 550710: ['Pseudomonas arcuscaelestis', 2710591, 'Bacteria; Proteobacteria; Gammaproteobacteria; Pseudomonadales; Pseudomonadaceae; Pseudomonas'], 2722818: ['Rhizobium phaseoli', 396, 'Bacteria; Proteobacteria; Alphaproteobacteria; Hyphomicrobiales; Rhizobiaceae; Rhizobium'], 1049584: ['Rhodococcus qingshengii', 334542, 'Bacteria; Actinobacteria; Actinomycetia; Corynebacteriales; Nocardiaceae; Rhodococcus'], 2109322: ['Rhodoferax ferrireducens', 192843, 'Bacteria; Proteobacteria; Betaproteobacteria; Burkholderiales; Comamonadaceae; Rhodoferax'], 2660640: ['Rugamonas rivuli', 2743358, 'Bacteria; Proteobacteria; Betaproteobacteria; Burkholderiales; Oxalobacteraceae; Rugamonas'], 2660639: ['Rugamonas aquatica', 2743357, 'Bacteria; Proteobacteria; Betaproteobacteria; Burkholderiales; Oxalobacteraceae; Rugamonas'], 2828730: ['Undibacterium rugosum', 2762291, 'Bacteria; Proteobacteria; Betaproteobacteria; Burkholderiales; Oxalobacteraceae; Undibacterium'], 1730500: ['Modestobacter deserti', 2497753, 'Bacteria; Actinobacteria; Actinomycetia; Geodermatophilales; Geodermatophilaceae; Modestobacter']}
+
+bracken = pd.read_csv(analysis_folder+'bracken_filtered.csv', index_col=2, header=0)
+
+with open(analysis_folder+'ncbi_taxid_to_gtdb_taxonomy.dict', 'rb') as f:
+    gtdb_taxonomy = pickle.load(f)
+
+for nid in new_ids:
+  try:
+    new_ids[nid].append(gtdb_taxonomy[new_ids[nid][1]])
+  except:
+    new_ids[nid].append('')
+
+rename_id = {}
+for nid in new_ids:
+  rename_id[nid] = new_ids[nid][1]
+  bracken.loc[nid, 'name'] = new_ids[nid][0]
+  bracken.loc[nid, 'Full NCBI taxonomy'] = new_ids[nid][2]
+  bracken.loc[nid, 'Full GTDB taxonomy'] = new_ids[nid][3]
+  
+bracken = bracken.rename(index=rename_id)
+bracken = bracken.groupby(by=bracken.index, axis=0).agg({'name':'first', 'Full NCBI taxonomy':'first', 'Full GTDB taxonomy':'first', 'D1':sum, 'D2':sum, 'D3':sum, 'D4':sum, 'D5':sum, 'D6':sum, 'D7':sum, 'D8':sum, 'D9':sum, 'D10':sum, 'D11':sum, 'D12':sum})
+bracken = bracken.loc[:, ['name', 'Full NCBI taxonomy', 'Full GTDB taxonomy', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12']]
+bracken.to_csv(analysis_folder+'bracken_filtered_new_ids.csv')
+
+with open(analysis_folder+'taxid_list_new_id.txt', 'w') as f:
+  for row in bracken.index.values:
+    w = f.write(str(row)+'\n')
+```
+Now we get a second tree with PhyloT, saved as PhyloT_V205_tree_new_id.txt (newick).
+
+```{python, eval=FALSE}
+with open(folder+'analysis/taxid_list_new_id.txt', "r") as f:
+    tax_str = ''
+    for row in f.read():
+      tax_str += row
+tax_str = tax_str.split('\n')
+tax_id = set([str(tax) for tax in tax_str])
+#tax_id = set([str(tax) for tax in tax_id])
+tree = Tree(folder+'analysis/PhyloT_V205_tree_new_id.txt', format=1)
+
+# get a list of all names as well as which of these are internal nodes and rename the internal nodes that have 'INT' in the node name to remove this 'INT'
+names = []
+internals = []
+for node in tree.traverse("postorder"):
+    if 'INT' in node.name:
+        node.name = node.name.split('INT')[1]
+        internals.append(node.name)
+    names.append(node.name)
+names = set(names)
+internals = set(internals)
+internals = set([tax for tax in tax_id if tax in internals])
+
+not_in_tree = [tax for tax in tax_id if tax not in names]
+#this is now empty
+
+# for the nodes that are taxonomy ID's in our list but aren't leaves, make some leaves with these (with 0 distance from the node)
+for node in tree.traverse("postorder"):
+    if node.name in internals:
+        node.add_child(name=node.name)
+
+# write the renamed tree with the new nodes
+tree.write(outfile=folder+'analysis/PhyloT_V205_tree_new_id_renamed.txt', format=1)
+
+# root the tree at the midpoint and write this rooted tree
+R = tree.get_midpoint_outgroup()
+tree.set_outgroup(R)
+tree.write(outfile=folder+'analysis/PhyloT_V205_tree_new_id_renamed_rooted.txt', format=1)
+```
+
+
+# Figures November 2022
+
+### Run ANOSIM and PERMANOVA
+
+This is for both taxa and AMR.
+
+Edit CARD no mutations:
+```{python}
+card_no_mut = pd.read_csv(folder+'analysis/card_drug_reduced/card_annotations_filtered_RPM_no_mutation.csv', index_col=0, header=0).drop(['Mean', 'Minimum', 'Maximum', 'Drug class'], axis=1)
+info = pd.read_csv(folder+'analysis/card_information_edit_VZ2.csv', header=0, index_col=0)
+#info = info.loc[card_no_mut.index.values, 'Drug Class Consolidated']
+card_no_mut['Drug Class Consolidated'] = info.loc[card_no_mut.index.values, 'Drug Class Consolidated']
+card_no_mut.to_csv(folder+'analysis/card_drug_reduced/card_annotations_filtered_RPM_no_mutation_edit.csv')
+```
+
+Prepare data for ANOSIM and PERMANOVA:
+```{python}
+kraken = pd.read_csv(folder+'analysis/bracken_filtered_new_ids.csv', index_col=0, header=0).drop(['name', 'Full NCBI taxonomy', 'Full GTDB taxonomy'], axis=1)
+card = pd.read_csv(folder+'analysis/card_annotations_filtered.csv', index_col=0, header=0)
+card_no_mut = pd.read_csv(folder+'analysis/card_drug_reduced/card_annotations_filtered_RPM_no_mutation.csv', index_col=0, header=0).drop(['Mean', 'Minimum', 'Maximum', 'Drug class'], axis=1)
+tree = read(folder+'analysis/PhyloT_V205_tree_new_id_renamed_rooted.txt', format="newick", into=TreeNode)
+db = [kraken, kraken, kraken, card, card, card_no_mut, card_no_mut]
+db_name = ['kraken', 'kraken', 'kraken', 'card', 'card', 'card_no_mutations', 'card_no_mutations']
+diversity = ['bc', 'clr', 'wuf', 'bc', 'clr', 'bc', 'clr']
+
+similarity_matrix = []
+
+for a in range(7):
+  if a < 5: continue
+  if diversity[a] == 'bc':
+    X = db[a].transpose().iloc[0:].values
+    similarities = np.nan_to_num(distance.cdist(X, X, 'braycurtis'))
+  elif diversity[a] == 'wuf':
+    this_df = pd.DataFrame(db[a])
+    this_df.index = this_df.index.map(str)
+    this_df = this_df.groupby(by=this_df.index, axis=0).sum()
+    X = this_df.transpose().iloc[0:].values
+    similarities = beta_diversity("weighted_unifrac", X, this_df.columns, tree=tree, otu_ids=this_df.index.values)
+    similarities = similarities.to_data_frame()
+  else:
+    this_db = pd.DataFrame(db[a])
+    X = db[a].iloc[0:].values
+    this_db = rclr(X)
+    this_db = pd.DataFrame(this_db, columns=db[a].columns, index=db[a].index.values).fillna(value=0)
+    X = this_db.transpose().iloc[0:].values
+    similarities = np.nan_to_num(distance.cdist(X, X, 'euclidean'))
+  similarities = pd.DataFrame(similarities, columns=db[a].columns, index=db[a].columns)
+  #similarities = similarities.iloc[0:].values
+  similarity_matrix.append(similarities)
+  similarities.to_csv(analysis_folder+'beta_diversity_'+db_name[a]+'_'+diversity[a]+'.csv')
+
+finished = True
+```
+
+Run ANOSIM and PERMANOVA:
+```{R, eval=FALSE}
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat = data.matrix(mat_df)
+
+groups_list = c('Wood', 'Wood', 'Wood', 'W-LDPE', 'W-LDPE', 'W-LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water')
+sample_names = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12')
+groups = data.frame(groups_list, sample_names)
+rownames(groups) = groups[,2]
+
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat = data.matrix(mat_df)
+first_anosim <- anosim(mat, groups$groups_list, permutations=999)
+first_permanova <- adonis(t(mat_df) ~ groups$groups_list, data=mat_df)
+first_as = c(first_anosim$statistic, first_anosim$signif)
+first_perm = c(first_permanova$aov.tab$F.Model[1], first_permanova$aov.tab$R2[1], first_permanova$aov.tab$`Pr(>F)`[1])
+
+w_wl = c(1,2,3,4,5,6)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[w_wl, w_wl]
+mat = data.matrix(mat_df)
+first_anosim_w_wl <- anosim(mat, groups$groups_list[w_wl], permutations=999)
+first_permanova_w_wl <- adonis(t(mat_df) ~ groups$groups_list[w_wl], data=mat_df)
+first_as_w_wl = c(first_anosim_w_wl$statistic, first_anosim_w_wl$signif)
+first_perm_w_wl = c(first_permanova_w_wl$aov.tab$F.Model[1], first_permanova_w_wl$aov.tab$R2[1], first_permanova_w_wl$aov.tab$`Pr(>F)`[1])
+
+w_l = c(1,2,3,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[w_l, w_l]
+mat = data.matrix(mat_df)
+first_anosim_w_l <- anosim(mat, groups$groups_list[w_l], permutations=999)
+first_permanova_w_l <- adonis(t(mat_df) ~ groups$groups_list[w_l], data=mat_df)
+first_as_w_l = c(first_anosim_w_l$statistic, first_anosim_w_l$signif)
+first_perm_w_l = c(first_permanova_w_l$aov.tab$F.Model[1], first_permanova_w_l$aov.tab$R2[1], first_permanova_w_l$aov.tab$`Pr(>F)`[1])
+
+w_w = c(1,2,3,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[w_w, w_w]
+mat = data.matrix(mat_df)
+first_anosim_w_w <- anosim(mat, groups$groups_list[w_w], permutations=999)
+first_permanova_w_w <- adonis(t(mat_df) ~ groups$groups_list[w_w], data=mat_df)
+first_as_w_w = c(first_anosim_w_w$statistic, first_anosim_w_w$signif)
+first_perm_w_w = c(first_permanova_w_w$aov.tab$F.Model[1], first_permanova_w_w$aov.tab$R2[1], first_permanova_w_w$aov.tab$`Pr(>F)`[1])
+
+wl_l = c(4,5,6,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[wl_l, wl_l]
+mat = data.matrix(mat_df)
+first_anosim_wl_l <- anosim(mat, groups$groups_list[wl_l], permutations=999)
+first_permanova_wl_l <- adonis(t(mat_df) ~ groups$groups_list[wl_l], data=mat_df)
+first_as_wl_l = c(first_anosim_wl_l$statistic, first_anosim_wl_l$signif)
+first_perm_wl_l = c(first_permanova_wl_l$aov.tab$F.Model[1], first_permanova_wl_l$aov.tab$R2[1], first_permanova_wl_l$aov.tab$`Pr(>F)`[1])
+
+wl_w = c(4,5,6,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[wl_w, wl_w]
+mat = data.matrix(mat_df)
+first_anosim_wl_w <- anosim(mat, groups$groups_list[wl_w], permutations=999)
+first_permanova_wl_w <- adonis(t(mat_df) ~ groups$groups_list[wl_w], data=mat_df)
+first_as_wl_w = c(first_anosim_wl_w$statistic, first_anosim_wl_w$signif)
+first_perm_wl_w = c(first_permanova_wl_w$aov.tab$F.Model[1], first_permanova_wl_w$aov.tab$R2[1], first_permanova_wl_w$aov.tab$`Pr(>F)`[1])
+
+l_w = c(7,8,9,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[l_w, l_w]
+mat = data.matrix(mat_df)
+first_anosim_l_w <- anosim(mat, groups$groups_list[l_w], permutations=999)
+first_permanova_l_w <- adonis(t(mat_df) ~ groups$groups_list[l_w], data=mat_df)
+first_as_l_w = c(first_anosim_l_w$statistic, first_anosim_l_w$signif)
+first_perm_l_w = c(first_permanova_l_w$aov.tab$F.Model[1], first_permanova_l_w$aov.tab$R2[1], first_permanova_l_w$aov.tab$`Pr(>F)`[1])
+
+
+
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat = data.matrix(mat_df)
+second_anosim <- anosim(mat, groups$groups_list, permutations=999)
+second_permanova <- adonis(t(mat_df) ~ groups$groups_list, data=mat_df)
+second_as = c(second_anosim$statistic, second_anosim$signif)
+second_perm = c(second_permanova$aov.tab$F.Model[1], second_permanova$aov.tab$R2[1], second_permanova$aov.tab$`Pr(>F)`[1])
+
+w_wl = c(1,2,3,4,5,6)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[w_wl, w_wl]
+mat = data.matrix(mat_df)
+second_anosim_w_wl <- anosim(mat, groups$groups_list[w_wl], permutations=999)
+second_permanova_w_wl <- adonis(t(mat_df) ~ groups$groups_list[w_wl], data=mat_df)
+second_as_w_wl = c(second_anosim_w_wl$statistic, second_anosim_w_wl$signif)
+second_perm_w_wl = c(second_permanova_w_wl$aov.tab$F.Model[1], second_permanova_w_wl$aov.tab$R2[1], second_permanova_w_wl$aov.tab$`Pr(>F)`[1])
+
+w_l = c(1,2,3,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[w_l, w_l]
+mat = data.matrix(mat_df)
+second_anosim_w_l <- anosim(mat, groups$groups_list[w_l], permutations=999)
+second_permanova_w_l <- adonis(t(mat_df) ~ groups$groups_list[w_l], data=mat_df)
+second_as_w_l = c(second_anosim_w_l$statistic, second_anosim_w_l$signif)
+second_perm_w_l = c(second_permanova_w_l$aov.tab$F.Model[1], second_permanova_w_l$aov.tab$R2[1], second_permanova_w_l$aov.tab$`Pr(>F)`[1])
+
+w_w = c(1,2,3,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[w_w, w_w]
+mat = data.matrix(mat_df)
+second_anosim_w_w <- anosim(mat, groups$groups_list[w_w], permutations=999)
+second_permanova_w_w <- adonis(t(mat_df) ~ groups$groups_list[w_w], data=mat_df)
+second_as_w_w = c(second_anosim_w_w$statistic, second_anosim_w_w$signif)
+second_perm_w_w = c(second_permanova_w_w$aov.tab$F.Model[1], second_permanova_w_w$aov.tab$R2[1], second_permanova_w_w$aov.tab$`Pr(>F)`[1])
+
+wl_l = c(4,5,6,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[wl_l, wl_l]
+mat = data.matrix(mat_df)
+second_anosim_wl_l <- anosim(mat, groups$groups_list[wl_l], permutations=999)
+second_permanova_wl_l <- adonis(t(mat_df) ~ groups$groups_list[wl_l], data=mat_df)
+second_as_wl_l = c(second_anosim_wl_l$statistic, second_anosim_wl_l$signif)
+second_perm_wl_l = c(second_permanova_wl_l$aov.tab$F.Model[1], second_permanova_wl_l$aov.tab$R2[1], second_permanova_wl_l$aov.tab$`Pr(>F)`[1])
+
+wl_w = c(4,5,6,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[wl_w, wl_w]
+mat = data.matrix(mat_df)
+second_anosim_wl_w <- anosim(mat, groups$groups_list[wl_w], permutations=999)
+second_permanova_wl_w <- adonis(t(mat_df) ~ groups$groups_list[wl_w], data=mat_df)
+second_as_wl_w = c(second_anosim_wl_w$statistic, second_anosim_wl_w$signif)
+second_perm_wl_w = c(second_permanova_wl_w$aov.tab$F.Model[1], second_permanova_wl_w$aov.tab$R2[1], second_permanova_wl_w$aov.tab$`Pr(>F)`[1])
+
+l_w = c(7,8,9,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[l_w, l_w]
+mat = data.matrix(mat_df)
+second_anosim_l_w <- anosim(mat, groups$groups_list[l_w], permutations=999)
+second_permanova_l_w <- adonis(t(mat_df) ~ groups$groups_list[l_w], data=mat_df)
+second_as_l_w = c(second_anosim_l_w$statistic, second_anosim_l_w$signif)
+second_perm_l_w = c(second_permanova_l_w$aov.tab$F.Model[1], second_permanova_l_w$aov.tab$R2[1], second_permanova_l_w$aov.tab$`Pr(>F)`[1])
+
+
+
+mat_df = as.data.frame(py$similarity_matrix[3])
+mat = data.matrix(mat_df)
+third_anosim <- anosim(mat, groups$groups_list, permutations=999)
+third_permanova <- adonis(t(mat_df) ~ groups$groups_list, data=mat_df)
+third_as = c(third_anosim$statistic, third_anosim$signif)
+third_perm = c(third_permanova$aov.tab$F.Model[1], third_permanova$aov.tab$R2[1], third_permanova$aov.tab$`Pr(>F)`[1])
+
+w_wl = c(1,2,3,4,5,6)
+mat_df = as.data.frame(py$similarity_matrix[3])
+mat_df = mat_df[w_wl, w_wl]
+mat = data.matrix(mat_df)
+third_anosim_w_wl <- anosim(mat, groups$groups_list[w_wl], permutations=999)
+third_permanova_w_wl <- adonis(t(mat_df) ~ groups$groups_list[w_wl], data=mat_df)
+third_as_w_wl = c(third_anosim_w_wl$statistic, third_anosim_w_wl$signif)
+third_perm_w_wl = c(third_permanova_w_wl$aov.tab$F.Model[1], third_permanova_w_wl$aov.tab$R2[1], third_permanova_w_wl$aov.tab$`Pr(>F)`[1])
+
+w_l = c(1,2,3,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[3])
+mat_df = mat_df[w_l, w_l]
+mat = data.matrix(mat_df)
+third_anosim_w_l <- anosim(mat, groups$groups_list[w_l], permutations=999)
+third_permanova_w_l <- adonis(t(mat_df) ~ groups$groups_list[w_l], data=mat_df)
+third_as_w_l = c(third_anosim_w_l$statistic, third_anosim_w_l$signif)
+third_perm_w_l = c(third_permanova_w_l$aov.tab$F.Model[1], third_permanova_w_l$aov.tab$R2[1], third_permanova_w_l$aov.tab$`Pr(>F)`[1])
+
+w_w = c(1,2,3,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[3])
+mat_df = mat_df[w_w, w_w]
+mat = data.matrix(mat_df)
+third_anosim_w_w <- anosim(mat, groups$groups_list[w_w], permutations=999)
+third_permanova_w_w <- adonis(t(mat_df) ~ groups$groups_list[w_w], data=mat_df)
+third_as_w_w = c(third_anosim_w_w$statistic, third_anosim_w_w$signif)
+third_perm_w_w = c(third_permanova_w_w$aov.tab$F.Model[1], third_permanova_w_w$aov.tab$R2[1], third_permanova_w_w$aov.tab$`Pr(>F)`[1])
+
+wl_l = c(4,5,6,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[3])
+mat_df = mat_df[wl_l, wl_l]
+mat = data.matrix(mat_df)
+third_anosim_wl_l <- anosim(mat, groups$groups_list[wl_l], permutations=999)
+third_permanova_wl_l <- adonis(t(mat_df) ~ groups$groups_list[wl_l], data=mat_df)
+third_as_wl_l = c(third_anosim_wl_l$statistic, third_anosim_wl_l$signif)
+third_perm_wl_l = c(third_permanova_wl_l$aov.tab$F.Model[1], third_permanova_wl_l$aov.tab$R2[1], third_permanova_wl_l$aov.tab$`Pr(>F)`[1])
+
+wl_w = c(4,5,6,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[3])
+mat_df = mat_df[wl_w, wl_w]
+mat = data.matrix(mat_df)
+third_anosim_wl_w <- anosim(mat, groups$groups_list[wl_w], permutations=999)
+third_permanova_wl_w <- adonis(t(mat_df) ~ groups$groups_list[wl_w], data=mat_df)
+third_as_wl_w = c(third_anosim_wl_w$statistic, third_anosim_wl_w$signif)
+third_perm_wl_w = c(third_permanova_wl_w$aov.tab$F.Model[1], third_permanova_wl_w$aov.tab$R2[1], third_permanova_wl_w$aov.tab$`Pr(>F)`[1])
+
+l_w = c(7,8,9,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[3])
+mat_df = mat_df[l_w, l_w]
+mat = data.matrix(mat_df)
+third_anosim_l_w <- anosim(mat, groups$groups_list[l_w], permutations=999)
+third_permanova_l_w <- adonis(t(mat_df) ~ groups$groups_list[l_w], data=mat_df)
+third_as_l_w = c(third_anosim_l_w$statistic, third_anosim_l_w$signif)
+third_perm_l_w = c(third_permanova_l_w$aov.tab$F.Model[1], third_permanova_l_w$aov.tab$R2[1], third_permanova_l_w$aov.tab$`Pr(>F)`[1])
+
+
+
+mat_df = as.data.frame(py$similarity_matrix[4])
+mat = data.matrix(mat_df)
+fourth_anosim <- anosim(mat, groups$groups_list, permutations=999)
+fourth_permanova <- adonis(t(mat_df) ~ groups$groups_list, data=mat_df)
+fourth_as = c(fourth_anosim$statistic, fourth_anosim$signif)
+fourth_perm = c(fourth_permanova$aov.tab$F.Model[1], fourth_permanova$aov.tab$R2[1], fourth_permanova$aov.tab$`Pr(>F)`[1])
+
+w_wl = c(1,2,3,4,5,6)
+mat_df = as.data.frame(py$similarity_matrix[4])
+mat_df = mat_df[w_wl, w_wl]
+mat = data.matrix(mat_df)
+fourth_anosim_w_wl <- anosim(mat, groups$groups_list[w_wl], permutations=999)
+fourth_permanova_w_wl <- adonis(t(mat_df) ~ groups$groups_list[w_wl], data=mat_df)
+fourth_as_w_wl = c(fourth_anosim_w_wl$statistic, fourth_anosim_w_wl$signif)
+fourth_perm_w_wl = c(fourth_permanova_w_wl$aov.tab$F.Model[1], fourth_permanova_w_wl$aov.tab$R2[1], fourth_permanova_w_wl$aov.tab$`Pr(>F)`[1])
+
+w_l = c(1,2,3,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[4])
+mat_df = mat_df[w_l, w_l]
+mat = data.matrix(mat_df)
+fourth_anosim_w_l <- anosim(mat, groups$groups_list[w_l], permutations=999)
+fourth_permanova_w_l <- adonis(t(mat_df) ~ groups$groups_list[w_l], data=mat_df)
+fourth_as_w_l = c(fourth_anosim_w_l$statistic, fourth_anosim_w_l$signif)
+fourth_perm_w_l = c(fourth_permanova_w_l$aov.tab$F.Model[1], fourth_permanova_w_l$aov.tab$R2[1], fourth_permanova_w_l$aov.tab$`Pr(>F)`[1])
+
+w_w = c(1,2,3,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[4])
+mat_df = mat_df[w_w, w_w]
+mat = data.matrix(mat_df)
+fourth_anosim_w_w <- anosim(mat, groups$groups_list[w_w], permutations=999)
+fourth_permanova_w_w <- adonis(t(mat_df) ~ groups$groups_list[w_w], data=mat_df)
+fourth_as_w_w = c(fourth_anosim_w_w$statistic, fourth_anosim_w_w$signif)
+fourth_perm_w_w = c(fourth_permanova_w_w$aov.tab$F.Model[1], fourth_permanova_w_w$aov.tab$R2[1], fourth_permanova_w_w$aov.tab$`Pr(>F)`[1])
+
+wl_l = c(4,5,6,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[4])
+mat_df = mat_df[wl_l, wl_l]
+mat = data.matrix(mat_df)
+fourth_anosim_wl_l <- anosim(mat, groups$groups_list[wl_l], permutations=999)
+fourth_permanova_wl_l <- adonis(t(mat_df) ~ groups$groups_list[wl_l], data=mat_df)
+fourth_as_wl_l = c(fourth_anosim_wl_l$statistic, fourth_anosim_wl_l$signif)
+fourth_perm_wl_l = c(fourth_permanova_wl_l$aov.tab$F.Model[1], fourth_permanova_wl_l$aov.tab$R2[1], fourth_permanova_wl_l$aov.tab$`Pr(>F)`[1])
+
+wl_w = c(4,5,6,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[4])
+mat_df = mat_df[wl_w, wl_w]
+mat = data.matrix(mat_df)
+fourth_anosim_wl_w <- anosim(mat, groups$groups_list[wl_w], permutations=999)
+fourth_permanova_wl_w <- adonis(t(mat_df) ~ groups$groups_list[wl_w], data=mat_df)
+fourth_as_wl_w = c(fourth_anosim_wl_w$statistic, fourth_anosim_wl_w$signif)
+fourth_perm_wl_w = c(fourth_permanova_wl_w$aov.tab$F.Model[1], fourth_permanova_wl_w$aov.tab$R2[1], fourth_permanova_wl_w$aov.tab$`Pr(>F)`[1])
+
+l_w = c(7,8,9,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[4])
+mat_df = mat_df[l_w, l_w]
+mat = data.matrix(mat_df)
+fourth_anosim_l_w <- anosim(mat, groups$groups_list[l_w], permutations=999)
+fourth_permanova_l_w <- adonis(t(mat_df) ~ groups$groups_list[l_w], data=mat_df)
+fourth_as_l_w = c(fourth_anosim_l_w$statistic, fourth_anosim_l_w$signif)
+fourth_perm_l_w = c(fourth_permanova_l_w$aov.tab$F.Model[1], fourth_permanova_l_w$aov.tab$R2[1], fourth_permanova_l_w$aov.tab$`Pr(>F)`[1])
+
+
+
+mat_df = as.data.frame(py$similarity_matrix[5])
+mat = data.matrix(mat_df)
+fifth_anosim <- anosim(mat, groups$groups_list, permutations=999)
+fifth_permanova <- adonis(t(mat_df) ~ groups$groups_list, data=mat_df)
+fifth_as = c(fifth_anosim$statistic, fifth_anosim$signif)
+fifth_perm = c(fifth_permanova$aov.tab$F.Model[1], fifth_permanova$aov.tab$R2[1], fifth_permanova$aov.tab$`Pr(>F)`[1])
+
+w_wl = c(1,2,3,4,5,6)
+mat_df = as.data.frame(py$similarity_matrix[5])
+mat_df = mat_df[w_wl, w_wl]
+mat = data.matrix(mat_df)
+fifth_anosim_w_wl <- anosim(mat, groups$groups_list[w_wl], permutations=999)
+fifth_permanova_w_wl <- adonis(t(mat_df) ~ groups$groups_list[w_wl], data=mat_df)
+fifth_as_w_wl = c(fifth_anosim_w_wl$statistic, fifth_anosim_w_wl$signif)
+fifth_perm_w_wl = c(fifth_permanova_w_wl$aov.tab$F.Model[1], fifth_permanova_w_wl$aov.tab$R2[1], fifth_permanova_w_wl$aov.tab$`Pr(>F)`[1])
+
+w_l = c(1,2,3,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[5])
+mat_df = mat_df[w_l, w_l]
+mat = data.matrix(mat_df)
+fifth_anosim_w_l <- anosim(mat, groups$groups_list[w_l], permutations=999)
+fifth_permanova_w_l <- adonis(t(mat_df) ~ groups$groups_list[w_l], data=mat_df)
+fifth_as_w_l = c(fifth_anosim_w_l$statistic, fifth_anosim_w_l$signif)
+fifth_perm_w_l = c(fifth_permanova_w_l$aov.tab$F.Model[1], fifth_permanova_w_l$aov.tab$R2[1], fifth_permanova_w_l$aov.tab$`Pr(>F)`[1])
+
+w_w = c(1,2,3,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[5])
+mat_df = mat_df[w_w, w_w]
+mat = data.matrix(mat_df)
+fifth_anosim_w_w <- anosim(mat, groups$groups_list[w_w], permutations=999)
+fifth_permanova_w_w <- adonis(t(mat_df) ~ groups$groups_list[w_w], data=mat_df)
+fifth_as_w_w = c(fifth_anosim_w_w$statistic, fifth_anosim_w_w$signif)
+fifth_perm_w_w = c(fifth_permanova_w_w$aov.tab$F.Model[1], fifth_permanova_w_w$aov.tab$R2[1], fifth_permanova_w_w$aov.tab$`Pr(>F)`[1])
+
+wl_l = c(4,5,6,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[5])
+mat_df = mat_df[wl_l, wl_l]
+mat = data.matrix(mat_df)
+fifth_anosim_wl_l <- anosim(mat, groups$groups_list[wl_l], permutations=999)
+fifth_permanova_wl_l <- adonis(t(mat_df) ~ groups$groups_list[wl_l], data=mat_df)
+fifth_as_wl_l = c(fifth_anosim_wl_l$statistic, fifth_anosim_wl_l$signif)
+fifth_perm_wl_l = c(fifth_permanova_wl_l$aov.tab$F.Model[1], fifth_permanova_wl_l$aov.tab$R2[1], fifth_permanova_wl_l$aov.tab$`Pr(>F)`[1])
+
+wl_w = c(4,5,6,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[5])
+mat_df = mat_df[wl_w, wl_w]
+mat = data.matrix(mat_df)
+fifth_anosim_wl_w <- anosim(mat, groups$groups_list[wl_w], permutations=999)
+fifth_permanova_wl_w <- adonis(t(mat_df) ~ groups$groups_list[wl_w], data=mat_df)
+fifth_as_wl_w = c(fifth_anosim_wl_w$statistic, fifth_anosim_wl_w$signif)
+fifth_perm_wl_w = c(fifth_permanova_wl_w$aov.tab$F.Model[1], fifth_permanova_wl_w$aov.tab$R2[1], fifth_permanova_wl_w$aov.tab$`Pr(>F)`[1])
+
+l_w = c(7,8,9,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[5])
+mat_df = mat_df[l_w, l_w]
+mat = data.matrix(mat_df)
+fifth_anosim_l_w <- anosim(mat, groups$groups_list[l_w], permutations=999)
+fifth_permanova_l_w <- adonis(t(mat_df) ~ groups$groups_list[l_w], data=mat_df)
+fifth_as_l_w = c(fifth_anosim_l_w$statistic, fifth_anosim_l_w$signif)
+fifth_perm_l_w = c(fifth_permanova_l_w$aov.tab$F.Model[1], fifth_permanova_l_w$aov.tab$R2[1], fifth_permanova_l_w$aov.tab$`Pr(>F)`[1])
+```
+
+CARD no mutations:
+```{R}
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat = data.matrix(mat_df)
+
+groups_list = c('Wood', 'Wood', 'Wood', 'W-LDPE', 'W-LDPE', 'W-LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water')
+sample_names = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12')
+groups = data.frame(groups_list, sample_names)
+rownames(groups) = groups[,2]
+
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat = data.matrix(mat_df)
+first_anosim <- anosim(mat, groups$groups_list, permutations=999)
+first_permanova <- adonis(t(mat_df) ~ groups$groups_list, data=mat_df)
+first_as = c(first_anosim$statistic, first_anosim$signif)
+first_perm = c(first_permanova$aov.tab$F.Model[1], first_permanova$aov.tab$R2[1], first_permanova$aov.tab$`Pr(>F)`[1])
+
+w_wl = c(1,2,3,4,5,6)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[w_wl, w_wl]
+mat = data.matrix(mat_df)
+first_anosim_w_wl <- anosim(mat, groups$groups_list[w_wl], permutations=999)
+first_permanova_w_wl <- adonis(t(mat_df) ~ groups$groups_list[w_wl], data=mat_df)
+first_as_w_wl = c(first_anosim_w_wl$statistic, first_anosim_w_wl$signif)
+first_perm_w_wl = c(first_permanova_w_wl$aov.tab$F.Model[1], first_permanova_w_wl$aov.tab$R2[1], first_permanova_w_wl$aov.tab$`Pr(>F)`[1])
+
+w_l = c(1,2,3,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[w_l, w_l]
+mat = data.matrix(mat_df)
+first_anosim_w_l <- anosim(mat, groups$groups_list[w_l], permutations=999)
+first_permanova_w_l <- adonis(t(mat_df) ~ groups$groups_list[w_l], data=mat_df)
+first_as_w_l = c(first_anosim_w_l$statistic, first_anosim_w_l$signif)
+first_perm_w_l = c(first_permanova_w_l$aov.tab$F.Model[1], first_permanova_w_l$aov.tab$R2[1], first_permanova_w_l$aov.tab$`Pr(>F)`[1])
+
+w_w = c(1,2,3,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[w_w, w_w]
+mat = data.matrix(mat_df)
+first_anosim_w_w <- anosim(mat, groups$groups_list[w_w], permutations=999)
+first_permanova_w_w <- adonis(t(mat_df) ~ groups$groups_list[w_w], data=mat_df)
+first_as_w_w = c(first_anosim_w_w$statistic, first_anosim_w_w$signif)
+first_perm_w_w = c(first_permanova_w_w$aov.tab$F.Model[1], first_permanova_w_w$aov.tab$R2[1], first_permanova_w_w$aov.tab$`Pr(>F)`[1])
+
+wl_l = c(4,5,6,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[wl_l, wl_l]
+mat = data.matrix(mat_df)
+first_anosim_wl_l <- anosim(mat, groups$groups_list[wl_l], permutations=999)
+first_permanova_wl_l <- adonis(t(mat_df) ~ groups$groups_list[wl_l], data=mat_df)
+first_as_wl_l = c(first_anosim_wl_l$statistic, first_anosim_wl_l$signif)
+first_perm_wl_l = c(first_permanova_wl_l$aov.tab$F.Model[1], first_permanova_wl_l$aov.tab$R2[1], first_permanova_wl_l$aov.tab$`Pr(>F)`[1])
+
+wl_w = c(4,5,6,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[wl_w, wl_w]
+mat = data.matrix(mat_df)
+first_anosim_wl_w <- anosim(mat, groups$groups_list[wl_w], permutations=999)
+first_permanova_wl_w <- adonis(t(mat_df) ~ groups$groups_list[wl_w], data=mat_df)
+first_as_wl_w = c(first_anosim_wl_w$statistic, first_anosim_wl_w$signif)
+first_perm_wl_w = c(first_permanova_wl_w$aov.tab$F.Model[1], first_permanova_wl_w$aov.tab$R2[1], first_permanova_wl_w$aov.tab$`Pr(>F)`[1])
+
+l_w = c(7,8,9,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[1])
+mat_df = mat_df[l_w, l_w]
+mat = data.matrix(mat_df)
+first_anosim_l_w <- anosim(mat, groups$groups_list[l_w], permutations=999)
+first_permanova_l_w <- adonis(t(mat_df) ~ groups$groups_list[l_w], data=mat_df)
+first_as_l_w = c(first_anosim_l_w$statistic, first_anosim_l_w$signif)
+first_perm_l_w = c(first_permanova_l_w$aov.tab$F.Model[1], first_permanova_l_w$aov.tab$R2[1], first_permanova_l_w$aov.tab$`Pr(>F)`[1])
+
+
+
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat = data.matrix(mat_df)
+second_anosim <- anosim(mat, groups$groups_list, permutations=999)
+second_permanova <- adonis(t(mat_df) ~ groups$groups_list, data=mat_df)
+second_as = c(second_anosim$statistic, second_anosim$signif)
+second_perm = c(second_permanova$aov.tab$F.Model[1], second_permanova$aov.tab$R2[1], second_permanova$aov.tab$`Pr(>F)`[1])
+
+w_wl = c(1,2,3,4,5,6)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[w_wl, w_wl]
+mat = data.matrix(mat_df)
+second_anosim_w_wl <- anosim(mat, groups$groups_list[w_wl], permutations=999)
+second_permanova_w_wl <- adonis(t(mat_df) ~ groups$groups_list[w_wl], data=mat_df)
+second_as_w_wl = c(second_anosim_w_wl$statistic, second_anosim_w_wl$signif)
+second_perm_w_wl = c(second_permanova_w_wl$aov.tab$F.Model[1], second_permanova_w_wl$aov.tab$R2[1], second_permanova_w_wl$aov.tab$`Pr(>F)`[1])
+
+w_l = c(1,2,3,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[w_l, w_l]
+mat = data.matrix(mat_df)
+second_anosim_w_l <- anosim(mat, groups$groups_list[w_l], permutations=999)
+second_permanova_w_l <- adonis(t(mat_df) ~ groups$groups_list[w_l], data=mat_df)
+second_as_w_l = c(second_anosim_w_l$statistic, second_anosim_w_l$signif)
+second_perm_w_l = c(second_permanova_w_l$aov.tab$F.Model[1], second_permanova_w_l$aov.tab$R2[1], second_permanova_w_l$aov.tab$`Pr(>F)`[1])
+
+w_w = c(1,2,3,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[w_w, w_w]
+mat = data.matrix(mat_df)
+second_anosim_w_w <- anosim(mat, groups$groups_list[w_w], permutations=999)
+second_permanova_w_w <- adonis(t(mat_df) ~ groups$groups_list[w_w], data=mat_df)
+second_as_w_w = c(second_anosim_w_w$statistic, second_anosim_w_w$signif)
+second_perm_w_w = c(second_permanova_w_w$aov.tab$F.Model[1], second_permanova_w_w$aov.tab$R2[1], second_permanova_w_w$aov.tab$`Pr(>F)`[1])
+
+wl_l = c(4,5,6,7,8,9)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[wl_l, wl_l]
+mat = data.matrix(mat_df)
+second_anosim_wl_l <- anosim(mat, groups$groups_list[wl_l], permutations=999)
+second_permanova_wl_l <- adonis(t(mat_df) ~ groups$groups_list[wl_l], data=mat_df)
+second_as_wl_l = c(second_anosim_wl_l$statistic, second_anosim_wl_l$signif)
+second_perm_wl_l = c(second_permanova_wl_l$aov.tab$F.Model[1], second_permanova_wl_l$aov.tab$R2[1], second_permanova_wl_l$aov.tab$`Pr(>F)`[1])
+
+wl_w = c(4,5,6,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[wl_w, wl_w]
+mat = data.matrix(mat_df)
+second_anosim_wl_w <- anosim(mat, groups$groups_list[wl_w], permutations=999)
+second_permanova_wl_w <- adonis(t(mat_df) ~ groups$groups_list[wl_w], data=mat_df)
+second_as_wl_w = c(second_anosim_wl_w$statistic, second_anosim_wl_w$signif)
+second_perm_wl_w = c(second_permanova_wl_w$aov.tab$F.Model[1], second_permanova_wl_w$aov.tab$R2[1], second_permanova_wl_w$aov.tab$`Pr(>F)`[1])
+
+l_w = c(7,8,9,10,11,12)
+mat_df = as.data.frame(py$similarity_matrix[2])
+mat_df = mat_df[l_w, l_w]
+mat = data.matrix(mat_df)
+second_anosim_l_w <- anosim(mat, groups$groups_list[l_w], permutations=999)
+second_permanova_l_w <- adonis(t(mat_df) ~ groups$groups_list[l_w], data=mat_df)
+second_as_l_w = c(second_anosim_l_w$statistic, second_anosim_l_w$signif)
+second_perm_l_w = c(second_permanova_l_w$aov.tab$F.Model[1], second_permanova_l_w$aov.tab$R2[1], second_permanova_l_w$aov.tab$`Pr(>F)`[1])
+
+
+```
+
+Import to Python and save as csv:
+```{python, eval=FALSE}
+first_anosim_tests = [r.first_as, r.first_as_w_wl, r.first_as_w_l, r.first_as_w_w, r.first_as_wl_l, r.first_as_wl_w, r.first_as_l_w]
+first_permanova_tests = [r.first_perm, r.first_perm_w_wl, r.first_perm_w_l, r.first_perm_w_w, r.first_perm_wl_l, r.first_perm_wl_w, r.first_perm_l_w]
+
+second_anosim_tests = [r.second_as, r.second_as_w_wl, r.second_as_w_l, r.second_as_w_w, r.second_as_wl_l, r.second_as_wl_w, r.second_as_l_w]
+second_permanova_tests = [r.second_perm, r.second_perm_w_wl, r.second_perm_w_l, r.second_perm_w_w, r.second_perm_wl_l, r.second_perm_wl_w, r.second_perm_l_w]
+
+third_anosim_tests = [r.third_as, r.third_as_w_wl, r.third_as_w_l, r.third_as_w_w, r.third_as_wl_l, r.third_as_wl_w, r.third_as_l_w]
+third_permanova_tests = [r.third_perm, r.third_perm_w_wl, r.third_perm_w_l, r.third_perm_w_w, r.third_perm_wl_l, r.third_perm_wl_w, r.third_perm_l_w]
+
+fourth_anosim_tests = [r.fourth_as, r.fourth_as_w_wl, r.fourth_as_w_l, r.fourth_as_w_w, r.fourth_as_wl_l, r.fourth_as_wl_w, r.fourth_as_l_w]
+fourth_permanova_tests = [r.fourth_perm, r.fourth_perm_w_wl, r.fourth_perm_w_l, r.fourth_perm_w_w, r.fourth_perm_wl_l, r.fourth_perm_wl_w, r.fourth_perm_l_w]
+
+fifth_anosim_tests = [r.fifth_as, r.fifth_as_w_wl, r.fifth_as_w_l, r.fifth_as_w_w, r.fifth_as_wl_l, r.fifth_as_wl_w, r.fifth_as_l_w]
+fifth_permanova_tests = [r.fifth_perm, r.fifth_perm_w_wl, r.fifth_perm_w_l, r.fifth_perm_w_w, r.fifth_perm_wl_l, r.fifth_perm_wl_w, r.fifth_perm_l_w]
+
+anosim_tests = [first_anosim_tests, second_anosim_tests, third_anosim_tests, fourth_anosim_tests, fifth_anosim_tests]
+permanova_tests = [first_permanova_tests, second_permanova_tests, third_permanova_tests, fourth_permanova_tests, fifth_permanova_tests]
+
+names = ['Overall', 'Overall', 'Wood vs W-LDPE', 'Wood vs W-LDPE', 'Wood vs LDPE', 'Wood vs LDPE', 'Wood vs Water', 'Wood vs Water', 'W-LDPE vs LDPE', 'W-LDPE vs LDPE', 'W-LDPE vs Water', 'W-LDPE vs Water', 'LDPE vs Water', 'LDPE vs Water']
+names_perm = ['Overall', 'Overall', 'Overall', 'Wood vs W-LDPE', 'Wood vs W-LDPE', 'Wood vs W-LDPE', 'Wood vs LDPE', 'Wood vs LDPE', 'Wood vs LDPE', 'Wood vs Water', 'Wood vs Water', 'Wood vs Water', 'W-LDPE vs LDPE', 'W-LDPE vs LDPE', 'W-LDPE vs LDPE', 'W-LDPE vs Water', 'W-LDPE vs Water', 'W-LDPE vs Water', 'LDPE vs Water', 'LDPE vs Water', 'LDPE vs Water']
+second_row = ['R', 'p', 'R', 'p', 'R', 'p', 'R', 'p', 'R', 'p', 'R', 'p', 'R', 'p']
+second_row_perm = ['F', 'R2', 'p', 'F', 'R2', 'p', 'F', 'R2', 'p', 'F', 'R2', 'p', 'F', 'R2', 'p', 'F', 'R2', 'p', 'F', 'R2', 'p']
+labels = ['R and p', 'Kraken2 Bray-Curtis', "Kraken2 Robust Aitchison's", 'Kraken2 Weighted Unifrac', 'CARD Bray-Curtis', "CARD Robust Aitchison's"]
+
+anosim_df = [second_row]
+
+for a in range(len(anosim_tests)):
+  this_test = []
+  for b in range(len(anosim_tests[a])):
+    this_test += anosim_tests[a][b]
+  anosim_df.append(this_test)
+
+anosim_df = pd.DataFrame(anosim_df, index=labels, columns=names)
+anosim_df.to_csv(save_folder+'Anosim_tests.csv')
+
+permanova_df = [second_row_perm]
+
+for a in range(len(permanova_tests)):
+  this_test = []
+  for b in range(len(permanova_tests[a])):
+    this_test += permanova_tests[a][b]
+  permanova_df.append(this_test)
+
+permanova_df = pd.DataFrame(permanova_df, index=labels, columns=names_perm)
+permanova_df.to_csv(save_folder+'Permanova_tests.csv')
+```
+
+CARD no mutations:
+Import to Python and save as csv:
+```{python, eval=FALSE}
+first_anosim_tests = [r.first_as, r.first_as_w_wl, r.first_as_w_l, r.first_as_w_w, r.first_as_wl_l, r.first_as_wl_w, r.first_as_l_w]
+first_permanova_tests = [r.first_perm, r.first_perm_w_wl, r.first_perm_w_l, r.first_perm_w_w, r.first_perm_wl_l, r.first_perm_wl_w, r.first_perm_l_w]
+
+second_anosim_tests = [r.second_as, r.second_as_w_wl, r.second_as_w_l, r.second_as_w_w, r.second_as_wl_l, r.second_as_wl_w, r.second_as_l_w]
+second_permanova_tests = [r.second_perm, r.second_perm_w_wl, r.second_perm_w_l, r.second_perm_w_w, r.second_perm_wl_l, r.second_perm_wl_w, r.second_perm_l_w]
+
+anosim_tests = [first_anosim_tests, second_anosim_tests]
+permanova_tests = [first_permanova_tests, second_permanova_tests]
+
+names = ['Overall', 'Overall', 'Wood vs W-LDPE', 'Wood vs W-LDPE', 'Wood vs LDPE', 'Wood vs LDPE', 'Wood vs Water', 'Wood vs Water', 'W-LDPE vs LDPE', 'W-LDPE vs LDPE', 'W-LDPE vs Water', 'W-LDPE vs Water', 'LDPE vs Water', 'LDPE vs Water']
+names_perm = ['Overall', 'Overall', 'Overall', 'Wood vs W-LDPE', 'Wood vs W-LDPE', 'Wood vs W-LDPE', 'Wood vs LDPE', 'Wood vs LDPE', 'Wood vs LDPE', 'Wood vs Water', 'Wood vs Water', 'Wood vs Water', 'W-LDPE vs LDPE', 'W-LDPE vs LDPE', 'W-LDPE vs LDPE', 'W-LDPE vs Water', 'W-LDPE vs Water', 'W-LDPE vs Water', 'LDPE vs Water', 'LDPE vs Water', 'LDPE vs Water']
+second_row = ['R', 'p', 'R', 'p', 'R', 'p', 'R', 'p', 'R', 'p', 'R', 'p', 'R', 'p']
+second_row_perm = ['F', 'R2', 'p', 'F', 'R2', 'p', 'F', 'R2', 'p', 'F', 'R2', 'p', 'F', 'R2', 'p', 'F', 'R2', 'p', 'F', 'R2', 'p']
+labels = ['R and p', 'CARD no mutations Bray-Curtis', "CARD no mutations Robust Aitchison's"]
+labels = ['CARD no mutations Bray-Curtis', "CARD no mutations Robust Aitchison's"]
+
+anosim_df = pd.read_csv(save_folder+'Anosim_tests.csv', index_col=0, header=0)
+rename_cols = {}
+for col in anosim_df.columns:
+  if '.' in col:
+    rename_cols[col] = col.split('.')[0]
+anosim_df = anosim_df.rename(columns=rename_cols)
+
+for a in range(len(anosim_tests)):
+  this_test = []
+  for b in range(len(anosim_tests[a])):
+    this_test += anosim_tests[a][b]
+  if labels[a] not in anosim_df.index.values: anosim_df.loc[labels[a], :] = this_test
+
+anosim_df.to_csv(save_folder+'Anosim_tests.csv')
+
+permanova_df = pd.read_csv(save_folder+'Permanova_tests.csv', index_col=0, header=0)
+rename_cols = {}
+for col in permanova_df.columns:
+  if '.' in col:
+    rename_cols[col] = col.split('.')[0]
+permanova_df = permanova_df.rename(columns=rename_cols)
+
+for a in range(len(permanova_tests)):
+  this_test = []
+  for b in range(len(permanova_tests[a])):
+    this_test += permanova_tests[a][b]
+  if labels[a] not in permanova_df.index.values: permanova_df.loc[labels[a], :] = this_test
+
+permanova_df.to_csv(save_folder+'Permanova_tests.csv')
+```
+
+
+### Draw tree function and confidence ellipse function
+
+RUN:
+```{python}
+def draw_tree(tree, orient_tree='horizontal', vert_orient='down', axes=None, label_func=str, span=355, plot_labels=True, end_same=True, fs=10):
+    # Arrays that store lines for the plot of clades
+    horizontal_linecollections = []
+    vertical_linecollections = []
+    def get_x_positions(tree):
+        """Create a mapping of each clade to its horizontal position.
+        Dict of {clade: x-coord}
+        """
+        depths = tree.depths()
+        # If there are no branch lengths, assume unit branch lengths
+        if not max(depths.values()):
+            depths = tree.depths(unit_branch_lengths=True)
+        return depths
+    def format_branch_label(clade):
+                return None
+    def get_y_positions(tree):
+        """Create a mapping of each clade to its vertical position.
+        Dict of {clade: y-coord}.
+        Coordinates are negative, and integers for tips.
+        """
+        maxheight = tree.count_terminals()
+        # Rows are defined by the tips
+        heights = {tip: maxheight - i for i, tip in enumerate(reversed(tree.get_terminals()))}
+        # Internal nodes: place at midpoint of children
+        def calc_row(clade):
+            for subclade in clade:
+                if subclade not in heights:
+                    calc_row(subclade)
+            # Closure over heights
+            heights[clade] = (
+                heights[clade.clades[0]] + heights[clade.clades[-1]]
+            ) / 2.0
+        if tree.root.clades:
+            calc_row(tree.root)
+        return heights
+    x_posns = get_x_positions(tree)
+    y_posns = get_y_positions(tree)
+    if axes is None:
+        fig = plt.figure()
+        if orient_tree == 'circular':
+            axes = fig.add_subplot(1, 1, 1, orientation='polar')
+        else:
+            axes = fig.add_subplot(1, 1, 1)
+    elif not isinstance(axes, plt.matplotlib.axes.Axes):
+        raise ValueError("Invalid argument for axes: %s" % axes)
+    leaves = [['Label', 'x loc', 'y loc', 'rotation', 'va', 'ha']]
+    def draw_clade_lines(orientation="horizontal",y_here=0,x_start=0,x_here=0,y_bot=0,y_top=0,color="black",lw=".1", ls='-'):
+        """Create a line.
+        Graphical formatting of the lines representing clades in the plot can be
+        customized by altering this function.
+        """
+        if orientation == "horizontal":
+            axes.hlines(y_here, x_start, x_here, color=color, lw=lw, linestyle=ls)
+        elif orientation == "vertical":
+            axes.vlines(x_here, y_bot, y_top, color=color, linestyle=ls)
+    def draw_clade(clade, x_start, color, lw, orient_tree='horizontal', vert_orient='up'):
+        """Recursively draw a tree, down from the given clade."""
+        x_here = x_posns[clade]
+        y_here = y_posns[clade]
+        xmax = max(x_posns.values())+max(x_posns.values())/30
+        # phyloXML-only graphics annotations
+        if hasattr(clade, "color") and clade.color is not None:
+            color = clade.color.to_hex()
+        if hasattr(clade, "width") and clade.width is not None:
+            lw = clade.width * plt.rcParams["lines.linewidth"]
+        if orient_tree == 'horizontal':
+            # Draw a horizontal line from start to here
+            draw_clade_lines(orientation='horizontal',y_here=y_here,x_start=x_start,x_here=x_here,color=color,lw=lw)
+            if clade.name != None and end_same and '__' not in clade.name:
+                draw_clade_lines(orientation='horizontal',y_here=y_here,x_start=xmax,x_here=x_here,color=color,lw=lw-1, ls='-.')
+            # Add node/taxon labels
+            if clade.name not in (None, clade.__class__.__name__):
+                label = label_func(clade.name)
+                if end_same: xplc = xmax
+                else: xplc = x_here
+                if plot_labels: axes.text(xplc, y_here, " %s" % label, verticalalignment="center", horizontalalignment='left', color='k', fontsize=fs)
+                leaves.append([label, xplc, y_here, 0, 'center', 'left']) 
+            if clade.clades:
+                # Draw a vertical line connecting all children
+                y_top = y_posns[clade.clades[0]]
+                y_bot = y_posns[clade.clades[-1]]
+                # Only apply widths to horizontal lines, like Archaeopteryx
+                draw_clade_lines(orientation='vertical',x_here=x_here,y_bot=y_bot,y_top=y_top,color=color,lw=lw)
+                # Draw descendents
+                for child in clade:
+                    draw_clade(child, x_here, color, lw)
+        elif orient_tree == 'vertical':
+                draw_clade_lines(orientation='vertical', x_here=y_here, y_bot=x_start, y_top=x_here,color=color,lw=lw)
+                if clade.name != None and end_same:
+                    draw_clade_lines(orientation='vertical',x_here=y_here, y_bot=xmax, y_top=x_here,color=color,lw=lw-1, ls='-.')
+                if clade.name not in (None, clade.__class__.__name__):
+                    label = label_func(clade.name)
+                    if end_same: xplc = xmax
+                    else: xplc = x_here
+                    if vert_orient == 'up':
+                        if plot_labels: axes.text(y_here, xplc,  " %s" % label, verticalalignment='bottom', horizontalalignment='center', color='k', rotation=90, fontsize=fs)
+                        leaves.append([label, y_here, xplc, 90, 'bottom', 'center']) 
+                    elif vert_orient == 'down':
+                        if plot_labels: axes.text(y_here, xplc,  " %s" % label, verticalalignment='top', horizontalalignment='center', color='k', rotation=90, fontsize=fs)
+                        leaves.append([label, y_here, xplc, 90, 'top', 'center']) 
+                if clade.clades:
+                    y_top = y_posns[clade.clades[0]]
+                    y_bot = y_posns[clade.clades[-1]]
+                    draw_clade_lines(orientation='horizontal', y_here=x_here, x_start=y_bot, x_here=y_top, color=color,lw=lw)
+                    for child in clade:
+                        draw_clade(child, x_here, color, lw, orient_tree='vertical', vert_orient=vert_orient)
+    def draw_clade_polar(clade, color, lw, x_start=0.1, y_start=0, span=360):
+        ymax = max(y_posns.values())
+        yang = span/ymax
+        xmax = max(x_posns.values())+max(x_posns.values())/30
+        x_here = x_posns[clade]
+        y_here = y_posns[clade]
+        rad = span*np.pi/180
+        rad = rad/ymax
+        if y_start == 0:
+            y_start = rad*y_start
+        y_here = rad*y_here
+        if x_here != 0: 
+            axes.plot([y_start, y_here], [x_start, x_here], color=color, lw=lw)
+            if clade.name != None and end_same:
+                axes.plot([y_start, y_here], [x_here, xmax], color=color, lw=lw-1, linestyle='-.')
+        if clade.name not in (None, clade.__class__.__name__):
+            label = label_func(clade.name)
+            rot = y_here*(180/np.pi)
+            if end_same: xplc = xmax
+            else: xplc = x_here
+            if rot <= 90: va, ha = 'center', 'left'
+            elif rot <= 180: va, ha, rot = 'center', 'right', rot-180
+            elif rot <= 270: va, ha, rot = 'center', 'right', rot-180
+            else: va, ha = 'center', 'left'
+            if plot_labels: axes.text(y_here, xplc, label, color='k', rotation=rot, rotation_mode='anchor', va=va, ha=ha, fontsize=fs)
+            leaves.append([label, y_here, xplc, rot, va, ha])
+        if clade.clades:
+            y_top = y_posns[clade.clades[0]]
+            y_bot = y_posns[clade.clades[-1]]
+            y_top = y_top*yang*np.pi/180
+            y_bot = y_bot*yang*np.pi/180
+            curve = [[y_bot, y_top], [x_here, x_here]]
+            x = np.linspace(curve[0][0], curve[0][1], 500)
+            y = interp1d(curve[0], curve[1])(x)
+            axes.plot(x, y, color=color, lw=lw)
+            ymin, ymax = min(x), max(x)
+            ydiff = ymax-ymin
+            count = [1 for child in clade]
+            count = sum(count)-2
+            locs = [ymin]
+            for a in range(count):
+                locs.append(ydiff/(count+1)+ymin)
+            locs.append(ymax)
+            count = 0
+            for child in clade:
+                if child.name != None: 
+                    y_start = y_posns[child]*rad
+                else:
+                    y_start = locs[count]
+                draw_clade_polar(child, color, lw, x_start=x_here, y_start=y_start, span=span)
+                count += 1
+    plt.sca(axes)
+    if orient_tree in ['horizontal', 'vertical']:
+        draw_clade(tree.root, 0, "k", plt.rcParams["lines.linewidth"], orient_tree=orient_tree, vert_orient=vert_orient)
+        if orient_tree == 'horizontal':
+            xmax = max(x_posns.values())
+            axes.set_xlim(-0.05 * xmax, 1.25 * xmax)
+            # Also invert the y-axis (origin at the top)
+            # Add a small vertical margin, but avoid including 0 and N+1 on the y axis
+            axes.set_ylim(max(y_posns.values()) + 0.8, 0.2)
+        elif orient_tree == 'vertical':
+            axes.set_xlim(max(y_posns.values()) + 0.8, 0.2)
+            xmax = max(x_posns.values())
+            if vert_orient == 'up':
+                axes.set_ylim(-0.05 * xmax, 1.25 * xmax)
+            elif vert_orient == 'down':
+                axes.set_ylim(1.25 * xmax, -0.05 * xmax)
+        axes.set_xticks([]), axes.set_yticks([])
+    elif orient_tree == 'circular':
+        print('Note that if you provided an axes for this then it must be polar orientation or it will probably look very strange')
+        x_start = 0
+        y_start = 0
+        draw_clade_polar(tree.root, "k", plt.rcParams["lines.linewidth"], x_start=x_start, y_start=y_start, span=span)
+        axes.set_ylim([0, max(x_posns.values())])
+        axes.yaxis.grid(False)
+        axes.set_xticks([])
+        axes.set_yticklabels([])
+    return leaves
+
+def confidence_ellipse(x, y, ax, n_std=3.0, facecolor='none', **kwargs):
+    """
+    Create a plot of the covariance confidence ellipse of *x* and *y*.
+    Parameters
+    x, y : array-like, shape (n, )
+    ----------
+        Input data.
+    ax : matplotlib.axes.Axes
+        The axes object to draw the ellipse into.
+    n_std : float
+        The number of standard deviations to determine the ellipse's radiuses.
+    **kwargs
+        Forwarded to `~matplotlib.patches.Ellipse`
+    Returns
+    -------
+    matplotlib.patches.Ellipse
+    """
+    if x.size != y.size:
+        raise ValueError("x and y must be the same size")
+    cov = np.cov(x, y)
+    pearson = cov[0, 1]/np.sqrt(cov[0, 0] * cov[1, 1])
+    # Using a special case to obtain the eigenvalues of this
+    # two-dimensionl dataset.
+    ell_radius_x = np.sqrt(1 + pearson)
+    ell_radius_y = np.sqrt(1 - pearson)
+    ellipse = Ellipse((0, 0), width=ell_radius_x * 2, height=ell_radius_y * 2,
+                      facecolor=facecolor, **kwargs)
+    # Calculating the stdandard deviation of x from
+    # the squareroot of the variance and multiplying
+    # with the given number of standard deviations.
+    scale_x = np.sqrt(cov[0, 0]) * n_std
+    mean_x = np.mean(x)
+    # calculating the stdandard deviation of y ...
+    scale_y = np.sqrt(cov[1, 1]) * n_std
+    mean_y = np.mean(y)
+    transf = transforms.Affine2D() \
+        .rotate_deg(45) \
+        .scale(scale_x, scale_y) \
+        .translate(mean_x, mean_y)
+    ellipse.set_transform(transf + ax.transData)
+    return ax.add_patch(ellipse)
+finish = True
+```
+
+## Figure 1
+
+Get reduced list of taxa at genus level:
+```{python}
+kraken = pd.read_csv(folder+'analysis/bracken_filtered_new_ids.csv', index_col=1, header=0)
+keeping = []
+rename = {}
+other_levels = {}
+for row in kraken.index.values:
+  if 'Bacteria' in kraken.loc[row, 'Full NCBI taxonomy']:
+    keeping.append(row)
+  else:
+    continue
+  try:
+    gen = kraken.loc[row, 'Full GTDB taxonomy'].split('g__')[1].split(';')[0]
+    rename[row] = gen
+    other_levels[gen] = kraken.loc[row, 'Full GTDB taxonomy'].split('g__')[0]
+  except:
+    gen = kraken.loc[row, 'Full NCBI taxonomy'].split('; ')[5]
+    rename[row] = gen
+    other = ''
+    for a in range(5): other += kraken.loc[row, 'Full NCBI taxonomy'].split(';')[a]+'; '
+    other_levels[gen] = other
+
+with open(folder+'analysis/other_levels_for_GTDB_genera.dict', 'wb') as f: pickle.dump(other_levels, f) 
+
+kraken = kraken.drop(['Full GTDB taxonomy', 'NCBI taxid', 'Full NCBI taxonomy'], axis=1)
+kraken_ra = kraken.divide(kraken.sum(axis=0), axis=1).multiply(100)
+kraken = kraken.loc[keeping, :].rename(index=rename)
+kraken = kraken.groupby(by=kraken.index, axis=0).sum()
+kraken.to_csv(folder+'analysis/bracken_filtered_new_ids_genus.csv')
+kraken_ra = kraken_ra.loc[keeping, :].rename(index=rename)
+kraken_ra = kraken_ra.groupby(by=kraken_ra.index, axis=0).sum()
+kraken_ra = kraken_ra[kraken_ra.max(axis=1) > 0.5]
+kraken = kraken.loc[kraken_ra.index, :]
+kraken.to_csv(folder+'analysis/bracken_filtered_new_ids_genus_over_0.5pc_abun.csv')
+kraken_ra.to_csv(folder+'analysis/bracken_filtered_new_ids_genus_over_0.5pc_abun_ra.csv')
+with open(folder+'analysis/genera.txt', 'w') as f:
+  w_str = ''
+  for row in kraken.index:
+    w_str += row+', '
+  f.write(w_str)
+write = True
+```
+
+Use GTDB tree:
+```{python}
+save_folder = '/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/'
+tree = Tree(save_folder+'bac120_r207.tree', quoted_node_names=True, format=1)
+
+count = 0
+leaves, others = [], []
+for node in tree.traverse("postorder"):
+  if node.is_leaf():
+    leaves.append(node.name)
+    #node.delete(prevent_nondicotomic=False, preserve_branch_length=True)
+  else:
+    others.append(node.name)
+
+others = [g for g in others if 'g__' in g]
+tree.prune(others)
+
+genera = ''
+for row in open('/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/genera.txt', 'r'):
+	genera += row
+
+genera = genera.split(', ')
+genera = genera[:-1] 
+
+others_genus = [g for g in others if g.split('g__')[1] in genera]
+others_genus_genera = [g.split('g__')[1] for g in others_genus]
+not_there = [g for g in genera if g not in others_genus_genera]
+rename_genera = {}
+for g in not_there:
+	#print([g.split('_')[0]])
+	short = g.split('_')[0]
+	for n in others:
+		if short in n:
+			rename_genera[g] = short
+			others_genus.append(n)
+			others_genus_genera.append(n.split('g__')[1])
+
+tree.prune(others_genus)
+
+kept = []
+for node in tree.traverse("postorder"):
+	if 'g__' in node.name:
+		node.name = node.name.split('g__')[1]
+		kept.append(node.name)
+
+tree.write(outfile=save_folder+'bac120_r207_genus.tree', format=1)
+```
+
+### Run differential abundance tests at genus level
+
+```{python}
+kraken = pd.read_csv(folder+'analysis/bracken_filtered_new_ids_genus.csv', index_col=0, header=0)
+```
+
+ANCOM:
+```{R, results='hide', fig.keep='all'}
+source(paste("/Users/robynwright/Dropbox/Langille_Lab_postdoc/Github/", "ancom_v2.1.R", sep=""))
+
+ft = py$kraken
+md = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+colnames(md) = c('Samples', 'Groups')
+
+process = feature_table_pre_process(ft, md, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_all = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_all = ancom_out_all$out
+
+#wood vs ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'))
+md_red = md[c(1,2,3,7,8,9),]
+process = feature_table_pre_process(ft_red, md_red, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_wo_l = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_wo_l = ancom_out_wo_l$out
+
+#wood vs weathered ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6'))
+md_red = md[c(1,2,3,4,5,6),]
+process = feature_table_pre_process(ft_red, md_red, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_wo_wl = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_wo_wl = ancom_out_wo_wl$out
+
+#ldpe vs weathered ldpe
+ft_red = subset(ft, select = c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'))
+md_red = md[c(4,5,6,7,8,9),]
+process = feature_table_pre_process(ft_red, md_red, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_l_wl = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_l_wl = ancom_out_l_wl$out
+
+all = ancom_out_all[, c(1,3,4,5,6)]
+rownames(all) = ancom_out_all[,1]
+colnames(all) = c('Feature', 'All vs All 0.9', 'All vs All 0.8', 'All vs All 0.7', 'All vs All 0.6')
+
+wo_l = ancom_out_wo_l[, c(1,3,4,5,6)]
+rownames(wo_l) = ancom_out_wo_l[,1]
+colnames(wo_l) = c('Feature', 'Wood vs LDPE 0.9', 'Wood vs LDPE 0.8', 'Wood vs LDPE 0.7', 'Wood vs LDPE 0.6')
+
+wo_wl = ancom_out_wo_wl[, c(1,3,4,5,6)]
+rownames(wo_wl) = ancom_out_wo_wl[,1]
+colnames(wo_wl) = c('Feature', 'Wood vs Weathered LDPE 0.9', 'Wood vs Weathered LDPE 0.8', 'Wood vs Weathered LDPE 0.7', 'Wood vs Weathered LDPE 0.6')
+
+l_wl = ancom_out_l_wl[, c(1,3,4,5,6)]
+rownames(l_wl) = ancom_out_l_wl[,1]
+colnames(l_wl) = c('Feature', 'LDPE vs Weathered LDPE 0.9', 'LDPE vs Weathered LDPE 0.8', 'LDPE vs Weathered LDPE 0.7', 'LDPE vs Weathered LDPE 0.6')
+
+merged = merge(all, wo_l, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, wo_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, l_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+
+merged = merged[,c(5,6,7,8, 10,11,12,13, 15,16,17,18, 20,21,22,23)]
+merged[is.na(merged)] <- FALSE
+write.csv(merged, paste(py$save_folder, "ancom_genus.csv", sep=''))
+```
+
+ALDEx2:
+```{R, eval=FALSE}
+ft = py$kraken
+md = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+colnames(md) = c('Samples', 'Groups')
+
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'))
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+results_all <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="kw", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+#wood vs ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'))
+md_red = md[c(1,2,3,7,8,9),]
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'), c('Wood', 'Wood', 'Wood', 'LDPE', 'LDPE', 'LDPE'))
+results_wo_l <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="t", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+#wood vs weathered ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6'))
+md_red = md[c(1,2,3,4,5,6),]
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D1', 'D2', 'D3','D4', 'D5', 'D6'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE'))
+results_wo_wl <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="t", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+#ldpe vs weathered ldpe
+ft_red = subset(ft, select = c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'))
+md_red = md[c(4,5,6,7,8,9),]
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'), c('W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE'))
+results_l_wl <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="t", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+all = results_all[, c(2,4)]
+colnames(all) = c('All vs All kw.eBH', 'All vs All glm.eBH')
+row.names(all) = rownames(ft)
+
+wo_l = results_wo_l[, c(1, 10)]
+colnames(wo_l) = c('Wood vs LDPE rab.all', 'Wood vs LDPE we.eBH')
+
+wo_wl = results_wo_wl[, c(1, 10)]
+colnames(wo_wl) = c('Wood vs Weathered LDPE rab.all', 'Wood vs Weathered LDPE we.eBH')
+
+l_wl = results_l_wl[, c(1, 10)]
+colnames(l_wl) = c('LDPE vs Weathered LDPE rab.all', 'LDPE vs Weathered LDPE we.eBH')
+
+merged = merge(all, wo_l, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, wo_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, l_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+
+merged = merged[,c(4,5,7,9,11)]
+merged[is.na(merged)] <- FALSE
+write.csv(merged, paste(py$save_folder, "aldex_genus.csv", sep=''))
+```
+
+Maaslin2 (rarefied):
+```{R, eval=FALSE}
+#maaslin seems to be a different version than it was when I previously ran it, and it now wants a reference group when running it with more than two groups - I don't want this to be against a reference so I'm just going to use the results from previously here.
+library(phyloseq)
+ft = py$kraken
+md = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+colnames(md) = c('Samples', 'Groups')
+rownames(md) = md[,1]
+
+table_num = data.matrix(ft[,1:12]) #convert the ASV table to a numeric matric
+rownames(table_num) = rownames(ft)
+table = otu_table(table_num, taxa_are_rows = TRUE)
+physeq = phyloseq(table)
+physeq_rare <- rarefy_even_depth(physeq, sample.size = min(sample_sums(physeq)), replace = TRUE, trimOTUs = TRUE, verbose = TRUE)
+table_rare = data.frame(otu_table(physeq_rare))
+ft = table_rare
+
+feat_table = data.frame(t(ft), check.rows = F, check.names = F, stringsAsFactors = F)
+results_all <- Maaslin2(feat_table, md, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_taxa_all", transform = "AST", fixed_effects = c("Groups"), reference='Groups,Water', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+
+#wood vs ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'))
+md_red = md[c(1,2,3,7,8,9),]
+row.names(ft_red) = rownames(ft)
+feat_table <- data.frame(t(ft_red), check.rows = F, check.names = F, stringsAsFactors = F)
+results_kraken_wo_l <- Maaslin2(feat_table, md_red, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_taxa_wo_l", transform = "AST", fixed_effects = c("Groups"), reference='Groups,Wood', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+
+#wood vs weathered ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6'))
+md_red = md[c(1,2,3,4,5,6),]
+row.names(ft_red) = rownames(ft)
+feat_table <- data.frame(t(ft_red), check.rows = F, check.names = F, stringsAsFactors = F)
+results_kraken_wo_wl <- Maaslin2(feat_table, md_red, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_taxa_wo_wl", transform = "AST", fixed_effects = c("Groups"), reference='Groups,Wood', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+
+#ldpe vs weathered ldpe
+ft_red = subset(ft, select = c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'))
+md_red = md[c(4,5,6,7,8,9),]
+row.names(ft_red) = rownames(ft)
+feat_table <- data.frame(t(ft_red), check.rows = F, check.names = F, stringsAsFactors = F)
+results_kraken_l_wl <- Maaslin2(feat_table, md_red, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_taxa_l_wl", transform = "AST", fixed_effects = c("Groups"), reference='Groups,LDPE', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+```
+
+Combine Maaslin results:
+```{python}
+kraken = pd.read_csv(folder+'analysis/bracken_filtered_new_ids_genus.csv', index_col=0, header=0)
+
+maaslin_all = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_taxa_all/significant_results.tsv', index_col=0, header=0, sep='\t')
+maaslin_wo_l = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_taxa_wo_l/significant_results.tsv', index_col=0, header=0, sep='\t')
+maaslin_wo_wl = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_taxa_wo_wl/significant_results.tsv', index_col=0, header=0, sep='\t')
+maaslin_l_wl = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_taxa_l_wl/significant_results.tsv', index_col=0, header=0, sep='\t')
+
+maaslin_dfs = [maaslin_all, maaslin_wo_l, maaslin_wo_wl, maaslin_l_wl]
+maaslin_signif = []
+for df in maaslin_dfs:
+  df = df[df['qval'] <= 0.1]
+  maaslin_signif.append(list(set(list(df.index.values))))
+
+maaslin_df = []
+for amr in kraken.index.values:
+  row = []
+  for sig in maaslin_signif:
+    if amr in sig: row.append(1)
+    else: row.append(0)
+  maaslin_df.append(row)
+maaslin_df = pd.DataFrame(maaslin_df, columns=['All $vs$ All', 'Wood $vs$ LDPE', 'Wood $vs$ W-LDPE', 'LDPE $vs$ W-LDPE'], index=kraken.index.values)
+maaslin_df.to_csv(save_folder+'maaslin_genus_0.1.csv')
+```
+
+Plot:
+```{python}
+plt.figure(figsize=(12,27))
+# ax_alpha_1 = plt.subplot2grid((100,49), (0,1), rowspan=11, colspan=8)
+# ax_alpha_2 = plt.subplot2grid((100,49), (0,13), rowspan=11, colspan=8)
+# ax_alpha_1_tt = plt.subplot2grid((100,49), (12,1), rowspan=3, colspan=8, frameon=False)
+# ax_alpha_2_tt = plt.subplot2grid((100,49), (12,13), rowspan=3, colspan=8, frameon=False)
+# 
+# ax_beta = plt.subplot2grid((100,49), (0,26), rowspan=15, colspan=23)
+
+ax_alpha_1 = plt.subplot2grid((100,49), (0,29), rowspan=11, colspan=8)
+ax_alpha_2 = plt.subplot2grid((100,49), (0,41), rowspan=11, colspan=8)
+ax_alpha_1_tt = plt.subplot2grid((100,49), (12,29), rowspan=3, colspan=8, frameon=False)
+ax_alpha_2_tt = plt.subplot2grid((100,49), (12,41), rowspan=3, colspan=8, frameon=False)
+
+ax_beta = plt.subplot2grid((100,49), (0,1), rowspan=15, colspan=23)
+
+te = ax_alpha_1.text(-0.2, 1.01, 'B', fontweight='bold', ha='center', va='bottom', transform=ax_alpha_1.transAxes, fontsize=16)
+te = ax_beta.text(-0.1, 1.01, 'A', fontweight='bold', ha='center', va='bottom', transform=ax_beta.transAxes, fontsize=16)
+te = ax_beta.text(-0.1, -0.2, 'C', fontweight='bold', ha='center', va='top', transform=ax_beta.transAxes, fontsize=16)
+ax1 = plt.subplot2grid((100,49), (18,21), colspan=19, rowspan=5, frameon=False) #sample dendrogram
+ax2_a = plt.subplot2grid((100,44), (27,0), rowspan=35, colspan=1, frameon=False) #phylogeny of taxonomic tree
+ax2 = plt.subplot2grid((100,44), (27,1), rowspan=35, colspan=11, frameon=False) #taxonomic tree
+ax3 = plt.subplot2grid((100,49), (27,21), colspan=19, rowspan=35) #main heatmap
+ax4 = plt.subplot2grid((133,66), (26,1), colspan=10, rowspan=2) #clr colorbar
+ax4_2 = plt.subplot2grid((133,66), (26,13), colspan=10, rowspan=2) #tools colorbar
+ax5 = plt.subplot2grid((100,49), (27,41), rowspan=35, colspan=8) #tools heatmap
+ax_blob_clr = plt.subplot2grid((100,96), (27,37), rowspan=35, colspan=3)
+
+plt.sca(ax_blob_clr)
+plt.yticks([]), plt.xticks([])
+
+kraken = pd.read_csv(folder+'analysis/bracken_filtered_new_ids_genus_over_0.5pc_abun.csv', index_col=0, header=0).rename(index={'Phycicoccus_A':'Phycicoccus'}).loc[:, sample_order_overall]
+kraken_sp = pd.read_csv(folder+'analysis/bracken_filtered_new_ids.csv', index_col=1, header=0).drop(['NCBI taxid', 'Full NCBI taxonomy', 'Full GTDB taxonomy'], axis=1).loc[:, sample_order_overall]
+
+X = kraken.iloc[0:].values
+rclr_df = rclr(X)
+rclr_df = pd.DataFrame(rclr_df, columns=kraken.columns, index=kraken.index.values).fillna(value=0)
+
+anosim_all = pd.read_csv(save_folder+'Anosim_tests.csv', index_col=0, header=0)
+anosim = [[anosim_all.iloc[1,0], anosim_all.iloc[1,1]], [anosim_all.iloc[2,0], anosim_all.iloc[2,1]], [anosim_all.iloc[3,0], anosim_all.iloc[3,1]]]
+permanova_all = pd.read_csv(save_folder+'Permanova_tests.csv', index_col=0, header=0)
+permanova = [[permanova_all.iloc[1,1], permanova_all.iloc[1,2]], [permanova_all.iloc[2,1], permanova_all.iloc[2,2]], [permanova_all.iloc[3,1], permanova_all.iloc[3,2]]]
+
+alpha_div, alpha_div_name, alpha_y, materials, alpha_ax, alpha_ax_tt = ['chao1', 'simpson'], ['Chao1 richness', "Simpson's index of\ndiversity"], ['Richness', 'Diversity'], ['LDPE', 'W-LDPE', 'Wood', 'Water'], [ax_alpha_1, ax_alpha_2], [ax_alpha_1_tt, ax_alpha_2_tt]
+text_locs = ['lower left', 'lower right']
+for a in range(len(alpha_ax)):
+  X = kraken_sp.loc[:, sample_order_overall].transpose().iloc[0:].values
+  this_alpha = alpha_diversity(alpha_div[a], X, kraken_sp.loc[:, sample_order_overall].columns)
+  alpha_split = [this_alpha[:3], this_alpha[3:6], this_alpha[6:9], this_alpha[9:]]
+  tests = []
+  for b in range(len(alpha_split)):
+    this_test = []
+    nm = 0
+    if b == 2: nm = 0.1
+    sc = alpha_ax[a].scatter(np.random.normal(b, nm, 3), alpha_split[b], color=sample_color[materials[b]], alpha=0.7, s=100, edgecolor='k')
+  alpha_rename = pd.DataFrame(this_alpha.copy(deep=True)).rename(index=sample_type).transpose()
+  alpha_melt = pd.melt(alpha_rename.reset_index(), id_vars=['index'], value_vars=['LDPE', 'W-LDPE', 'Wood', 'Water'])
+  alpha_melt.columns = ['index', 'treatments', 'value']
+  alpha_melt['index'] = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
+  res = stat()
+  res.anova_stat(df=alpha_melt, res_var='value', anova_model='value ~ C(treatments)')
+  anova_summary = res.anova_summary
+  anova_f, anova_p = anova_summary.loc['C(treatments)', 'F'], anova_summary.loc['C(treatments)', 'PR(>F)']
+  anova_string = 'ANOVA:\nF='+str(round(anova_f, 3))+', $p$='+str(round(anova_p, 3))
+  anchored_text = AnchoredText(anova_string, loc=text_locs[a], prop=dict(size=7))
+  pa = anchored_text.patch.set_boxstyle("round,pad=0.,rounding_size=0.2")
+  alpha_ax[a].add_artist(anchored_text)
+  res.tukey_hsd(df=alpha_melt, res_var='value', xfac_var='treatments', anova_model='value ~ C(treatments)')
+  tukey_summary = res.tukey_summary
+  for b in range(len(materials)):
+    for c in range(len(materials)):
+      if b > c: continue
+      if b == c: pv = ''
+      else:
+        for row in tukey_summary.index.values:
+          this_row = tukey_summary.loc[row, :].values
+          if materials[b] in this_row and materials[c] in this_row:
+            pv = this_row[-1]
+      col = 'w'
+      if pv != '':
+        if pv <= 0.05:
+          col = '#F1948A'
+      ba = alpha_ax_tt[a].bar(b,1,bottom=4-c, width=1, color=col, edgecolor='k')
+      if pv == '': continue
+      te = alpha_ax_tt[a].text(b, 4-c+0.5, str(round(pv, 3)), ha='center', va='center', fontsize=8)
+  plt.sca(alpha_ax[a])
+  xt = plt.xticks([0, 1, 2, 3], [], rotation=90)
+  xl = plt.xlim(-0.5, 3.5)
+  yl = plt.ylabel(alpha_y[a], fontweight='bold')
+  ti = plt.title(alpha_div_name[a], fontweight='bold')
+  plt.sca(alpha_ax_tt[a])
+  xt = plt.xticks([0, 1, 2, 3], materials, rotation=90, fontweight='bold')
+  yt = plt.yticks([4.5, 3.5, 2.5, 1.5], materials, fontweight='bold')
+  xl = plt.xlim(-0.55, 3.55)
+  yl = plt.ylim(0.95, 5.05)
+  if a == 0: yl = plt.ylabel("Tukey's HSD $p$-values", fontweight='bold')
+
+plt.sca(ax_beta)
+X = kraken_sp.iloc[0:].values
+rclr_df_sp = rclr(X)
+rclr_df_sp = pd.DataFrame(rclr_df_sp, columns=kraken_sp.columns, index=kraken_sp.index.values).fillna(value=0)
+X = rclr_df_sp.transpose().iloc[0:].values
+similarities = np.nan_to_num(distance.cdist(X, X, 'euclidean'))
+pcoa_results = ordination.pcoa(similarities)
+PC1, PC2 = pcoa_results.samples.loc[:, 'PC1'].values, pcoa_results.samples.loc[:, 'PC2'].values
+prop_explain1, prop_explain2 = pcoa_results.proportion_explained[0], pcoa_results.proportion_explained[1]
+values_x, values_y = {}, {}
+for b in range(len(PC1)):
+  name = sample_type[kraken.columns[b]]
+  color = sample_color[name]
+  if name in values_x: values_x[name] = values_x[name]+[PC1[b]]
+  else: values_x[name] = [PC1[b]]
+  if name in values_y: values_y[name] = values_y[name]+[PC2[b]]
+  else: values_y[name] = [PC2[b]]
+  sc = ax_beta.scatter(PC1[b], PC2[b], color=color, edgecolor='k', s=100, alpha=0.7)
+stats_string = 'ANOSIM: R='+str(round(float(anosim[1][0]), 3))+r', $p$='+str(round(float(anosim[1][1]), 3))+'\n'
+stats_string += 'PERMANOVA: $R^{2}$='+str(round(float(permanova[1][0]), 3))+r', $p$='+str(round(float(permanova[1][1]), 3))
+anchored_text = AnchoredText(stats_string.replace('\t', '   '), loc='upper right', prop=dict(size=10))
+anchored_text.patch.set_boxstyle("round,pad=0.,rounding_size=0.2")
+at = ax_beta.add_artist(anchored_text)
+for name in values_x:
+  ce = confidence_ellipse(np.asarray(values_x[name]), np.asarray(values_y[name]), ax=ax_beta, edgecolor=sample_color[name])
+xl = ax_beta.set_xlabel('PCoA1 ('+format(prop_explain1*100, '.2f')+'%)', fontweight='bold')
+yl = ax_beta.set_ylabel('PCoA2 ('+format(prop_explain2*100, '.2f')+'%)', fontweight='bold')
+handles = [Line2D([0], [0], marker='s', color='w', label=name, markerfacecolor=sample_color[name], markersize=12) for name in sample_color if name != 'Weathered LDPE']
+le = ax_beta.legend(handles=handles, loc='lower right', fontsize=10, ncol=2)
+ti = ax_beta.set_title("Robust Aitchison's distance", fontweight='bold')
+
+plt.sca(ax1)
+plt.yticks([])
+X = rclr_df.transpose().iloc[0:].values
+similarities = np.nan_to_num(distance.cdist(X, X, 'euclidean'))
+dist = pd.DataFrame(similarities, columns=rclr_df.columns, index=rclr_df.columns)
+dist.columns, dist.index = rclr_df.columns, rclr_df.columns
+Z = ssd.squareform(dist)
+Z = hierarchy.linkage(Z, "ward")
+mpl.rcParams['lines.linewidth'] = 2
+hierarchy.set_link_color_palette(['k'])
+dn = hierarchy.dendrogram(Z, above_threshold_color='k', orientation='top')
+sample_order = [kraken.columns[int(l.get_text())] for l in list(ax1.get_xticklabels())]
+sample_plot = [sample_type[sample] for sample in sample_order]
+ti = plt.xticks(list(ax1.get_xticks()), sample_plot, fontsize=10, rotation=90, fontweight='bold')
+
+# modify labels
+for tl in ax1.get_xticklabels():
+  txt = tl.get_text()
+  col = sample_color[txt]
+  tll = tl.set_backgroundcolor(col)
+  
+#draw tree
+ra_df = pd.read_csv(save_folder+'summary_reads_relabun/genus_relabun.csv', index_col=0, header=0)
+tree = Phylo.read(save_folder+'bac120_r207_genus.tree', "newick")
+leaves = draw_tree(tree, axes=ax2, end_same=True, plot_labels=False)
+feat_order, feat_loc, feat_loc_x = [], [], []
+feat_max, feat_max_clr, feat_max_ra = [], [], []
+clr_max = pd.DataFrame(rclr_df.max(axis=1))
+ra_max = pd.DataFrame(ra_df.max(axis=1))
+for leaf in leaves:
+  if leaf[0] != 'Label':
+    tax = leaf[0]
+    if '__' in tax: continue
+    feat_max_clr.append(clr_max.loc[tax, 0])
+    if tax == 'Phycicoccus': tax = 'Phycicoccus_A'
+    feat_max_ra.append(ra_max.loc[tax, 0])
+    if '_' in tax: tax = '$'+tax.split('_')[0]+'$_'+tax.split('_')[1]
+    else: tax = '$'+tax+'$'
+    tx = ax2.text(leaf[1], leaf[2], '   '+tax, fontsize=8, va='center', ha='left')
+    appnd = feat_order.append(leaf[0]), feat_loc.append(leaf[2]), feat_loc_x.append(leaf[1])
+yl = plt.ylim([0.5, 40.5])
+
+with open(folder+'analysis/other_levels_for_GTDB_genera.dict', 'rb') as f:
+    other_levels = pickle.load(f)
+    
+class_names = []
+for row in feat_order:
+  if row == 'Phycicoccus': class_name = other_levels[row+'_A']
+  else: class_name = other_levels[row]
+  # try: class_name = class_name.split('c__')[1].split(';')[0]
+  # except: class_name = class_name.split('; ')[2]
+  class_name = class_name.split(';')[2].replace('c__', '').replace('  Betaproteobacteria', 'Gammaproteobacteria').replace(' ', '')
+  class_names.append(class_name)
+  
+start_group, finish_group, group_name = [0.5], [], []
+for a in range(len(class_names)):
+  if a == 0: continue
+  if class_names[a] != class_names[a-1]:
+    finish_group.append(feat_loc[a]-0.5)
+    start_group.append(feat_loc[a]-0.5)
+    group_name.append(class_names[a-1])
+finish_group.append(feat_loc[-1]+0.5), group_name.append(class_names[-1])
+
+class_count = 8
+handles = []
+for a in range(len(start_group)):
+  bar = ax2_a.bar(0, finish_group[a]-start_group[a]-0.1, bottom=start_group[a]+0.05, edgecolor='k', alpha=0.4)
+  bar2 = ax2.bar(0.02, finish_group[a]-start_group[a]-0.1, bottom=start_group[a]+0.05, alpha=0.2, width=1.32)
+  tx = ax2_a.text(0, np.mean([finish_group[a], start_group[a]]), str(class_count-a), ha='center', va='center')
+  color = bar.patches[0].get_facecolor()
+  handles.append(Patch(facecolor=color, edgecolor='k', label=str(class_count-a)+': '+group_name[a]))
+
+handles.reverse()
+plt.sca(ax2_a)
+leg = plt.legend(handles=handles, bbox_to_anchor=(0,1.11), loc='upper left', ncol=2, fontsize=8)
+xt = plt.xticks([])
+yt = plt.yticks([])
+yl = plt.ylim([0.5, 40.5])
+
+#main heatmap
+plt.sca(ax3)
+ra_df = pd.read_csv(save_folder+'summary_reads_relabun/genus_relabun.csv', index_col=0, header=0)
+rename_ra = {}
+for col in ra_df.columns: 
+  if ':' in col: 
+    rename_ra[col] = col.split(':')[0]
+feat_order_df = [f.replace('Phycicoccus', 'Phycicoccus_A') for f in feat_order]
+ra_df = ra_df.rename(columns=rename_ra).loc[feat_order_df, sample_order]
+#rclr_df = rclr_df.loc[feat_order, sample_order]
+#rclr_df.to_csv(save_folder+'rclr_df_plotted_Fig1.csv')
+#pc = plt.pcolor(rclr_df, edgecolor='k', vmin=-3, vmax=3)
+norm_ra = colors.LogNorm(vmin=0.04, vmax=max(ra_df.max(axis=1)))
+cmap_main = 'Reds'
+pc = plt.pcolor(ra_df, edgecolor='k', cmap=cmap_main, norm=norm_ra)
+for c in range(len(ra_df.columns)):
+  for r in range(len(ra_df.index)):
+    val = ra_df.iloc[r, c]
+    if val > 10:
+      fc = 'w'
+      val = str(int(val))
+    elif val > 1:
+      fc = 'w'
+      val = str(round(val, 1))
+    else:
+      fc = 'k'
+      if val == 0: 
+        val = '*'
+        ba = plt.bar(c, 1, width=1, bottom=r, color='w')
+      else:
+        val = str(round(val, 1))
+    tx = plt.text(c+0.5, r+0.5, str(val), color=fc, ha='center', va='center', fontsize=8)
+yt = plt.yticks([])
+xt = plt.xticks([])
+#xl = ax3.set_xlabel('Robust CLR abundance of genera', fontweight='bold')    
+xl = ax3.set_xlabel('Relative abundance of genera (%)', fontweight='bold')    
+
+#blobs
+plt.sca(ax_blob_clr)
+for a in range(len(feat_max_ra)):
+  pl = plt.plot([0, 1], [a, a], 'k-', lw=1)
+  #sc = plt.scatter(0.5, a+0.5, color='k', s=feat_max_clr[a]*15)
+  ra = feat_max_ra[a]
+  #log_ra = np.log10(ra+0.0001)
+  sc = plt.scatter(0.5, a+0.5, color='k', s=ra*2)
+yl = plt.ylim([0, 40])
+xl = plt.xlim([0, 1])
+xt = plt.xticks([0.5], ['Maximum relative\nabundance (%)'], rotation=90, fontsize=8, fontweight='bold')
+tt = ax_blob_clr.xaxis.tick_top()
+
+#color bars
+plt.sca(ax4)
+#cmap = mpl.cm.viridis
+#norm = mpl.colors.Normalize(vmin=-3, vmax=3)#min(rclr_df.min(axis=1)), vmax=2.5)#max(rclr_df.max(axis=1)))
+#cb = mpl.colorbar.ColorbarBase(ax4, cmap=cmap, norm=norm, orientation='horizontal')
+cb = mpl.colorbar.ColorbarBase(ax4, cmap=cmap_main, norm=norm_ra, orientation='horizontal')
+tp = cb.ax.tick_params(labelsize=6)
+# st = cb.set_ticks([-3, -1.5, 0, 1.5, 3])
+# tl = cb.set_ticklabels(['< -3', '-1.5', '0', '1.5', '> 3'])
+# xl = plt.xlabel('Robust CLR', fontsize=8, fontweight='bold')
+#st = cb.set_ticks([0, 2, 4, 6, 8, 10])
+#tl = cb.set_ticklabels(['0', '2', '4', '6', '8', '>10'])
+xl = plt.xlabel('Relative abundance (%)', fontsize=8, fontweight='bold')
+plt.sca(ax4_2)
+cmap_da = 'YlGn'
+norm = mpl.colors.Normalize(vmin=0, vmax=3)
+fake_df = pd.DataFrame([[0, 1, 2, 3]])
+pc = plt.pcolor(fake_df, edgecolor='k', cmap=cmap_da, vmin=0, vmax=3)
+yt = plt.yticks([])
+xt = plt.xticks([0.5, 1.5, 2.5, 3.5], [0, 1, 2, 3], fontsize=8)
+xl = plt.xlabel('Number of tools finding\ngenus DA', fontsize=8, fontweight='bold')
+
+#differential abundance
+ancom = pd.read_csv(save_folder+'ancom_genus.csv', index_col=0, header=0)
+ancom = ancom.iloc[:, [2,6,10,14]]
+ancom[ancom == False] = 0
+ancom[ancom == True] = 1
+ancom = ancom.rename(columns={'All vs All 0.7':'All $vs$ All', 'Wood vs LDPE 0.7':'Wood $vs$ LDPE',
+       'Wood vs Weathered LDPE 0.7':'Wood $vs$ W-LDPE', 'LDPE vs Weathered LDPE 0.7':'LDPE $vs$ W-LDPE'})
+
+aldex = pd.read_csv(save_folder+'aldex_genus.csv', index_col=0, header=0)
+aldex = aldex.iloc[:, [1,2,3,4]]
+aldex = aldex.rename(columns={'All vs All glm.eBH':'All $vs$ All', 'Wood vs LDPE we.eBH':'Wood $vs$ LDPE',
+       'Wood vs Weathered LDPE we.eBH':'Wood $vs$ W-LDPE', 'LDPE vs Weathered LDPE we.eBH':'LDPE $vs$ W-LDPE'})
+       
+for row in aldex.index.values:
+  for col in aldex.columns:
+    if aldex.loc[row, col] <= 0.1: aldex.loc[row, col] = 1
+    else: aldex.loc[row, col] = 0
+maaslin = pd.read_csv(save_folder+'maaslin_genus_0.1.csv', index_col=0, header=0)
+
+combined = pd.concat([ancom, aldex, maaslin])
+combined = combined.groupby(by=combined.index, axis=0).sum()
+combined = combined.loc[feat_order_df, :]
+plt.sca(ax5)
+yt = plt.yticks([])
+combined = combined.apply(pd.to_numeric)
+pc = plt.pcolor(combined, edgecolor='k', cmap=cmap_da, vmin=0, vmax=3)
+markers = ['o', '^', 's']
+marker_locs = [0.25, 0.5, 0.75]
+da_dfs = [ancom, aldex, maaslin]
+for c in range(len(combined.columns)):
+  for r in range(len(combined.index)):
+    for a in range(len(da_dfs)):
+      if combined.iloc[r,c] > 2: mc = 'w'
+      else: mc = 'k'
+      if da_dfs[a].loc[combined.index[r], combined.columns[c]] > 0: sc = plt.scatter(c+marker_locs[a], r+0.5, marker=markers[a], s=8, color=mc)
+names = ['ANCOM-II', 'ALDEx2', 'MaAsLin2']
+handles = [Line2D([0], [0], marker=markers[n], color='w', label=names[n], markerfacecolor='k', markersize=8) for n in range(len(names))]
+lg = plt.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5,1.25), ncol=2, fontsize=8)
+xt = plt.xticks([0.5, 1.5, 2.5, 3.5], combined.columns, rotation=90)
+tt = ax5.xaxis.tick_top()
+xl = ax5.set_xlabel('Number of tools finding\ngenus differentially abundant', fontweight='bold')    
+xl = ax5.xaxis.set_label_position('bottom') 
+
+#plt.savefig(save_folder+'Fig1.png', dpi=600, bbox_inches='tight')
+plt.savefig(save_folder+'Fig1_flip_AB.png', dpi=600, bbox_inches='tight')
+```
+
+## Fig SX all abundance heatmap
+
+```{python}
+levels = ['domain', 'phylum', 'class', 'order', 'family', 'genus', 'species']
+fig = plt.figure(figsize=(35,10))
+table = pd.read_csv(folder+'analysis/bracken_filtered_new_ids.csv', index_col=0, header=0).fillna(value='')
+rename = {}
+
+for row in table.index:
+  hierarchy = []
+  if table.loc[row, 'Full GTDB taxonomy'] != '':
+    tax = table.loc[row, 'Full GTDB taxonomy'].split(';')
+    for t in tax:
+      t = t.split('__')[1]
+      hierarchy.append(t)
+  else:
+    tax = table.loc[row, 'Full NCBI taxonomy'].split(';')+[table.loc[row, 'name']]
+    for t in tax:
+      hierarchy.append(t.lstrip())
+  rename[row] = hierarchy
+
+for a in range(len(levels)):
+  #if a > 0: continue
+  rename_table = {}
+  for row in rename:
+    rename_table[row] = rename[row][a]
+  this_level = table.copy(deep=True).rename(index=rename_table)
+  this_level = this_level.groupby(by=this_level.index, axis=0).sum()
+  this_level.to_csv(save_folder+levels[a]+'_reads.csv')
+  this_level = this_level.divide(this_level.sum(axis=0), axis=1).multiply(100)
+  this_level.to_csv(save_folder+levels[a]+'_relabun.csv')
+  this_level = this_level.rename(columns=sample_type)
+  this_level = this_level.groupby(by=this_level.columns, axis=1).mean()
+  this_level['Sum'] = this_level.sum(axis=1)
+  this_level = this_level.sort_values(by=['Sum'], ascending=True)
+  if this_level.shape[0] > 30: this_level = this_level.tail(30)
+  this_level = this_level.drop('Sum', axis=1)
+  ax = plt.subplot2grid((34,7), (0,a), rowspan=this_level.shape[0])
+  plt.sca(ax)
+  this_level = this_level.loc[:, material_order]
+  pc = plt.pcolor(this_level, edgecolor='k', vmax=10)
+  #ma = max(this_level.max(axis=1))
+  for b in range(len(this_level.index)):
+    for c in range(len(this_level.columns)):
+      col = 'w'
+      if this_level.iloc[b, c] > 7: col = 'k'
+      te = plt.text(c+0.5, b+0.5, str(round(this_level.iloc[b, c], 2)), ha='center', va='center', color=col)
+  tax = list(this_level.index)
+  if levels[a] == 'genus':
+    for r in range(len(tax)):
+      if '_' in tax[r]:
+        tt = tax[r].split('_')
+        tax[r] = '$'+tt[0]+'$_'+tt[1]
+      else:
+        tax[r] = '$'+tax[r]+'$'
+  elif levels[a] == 'species':
+    for r in range(len(tax)):
+      gen, sp = tax[r].split(' ')[0], tax[r].split(' ')[1]
+      if '_' in gen:
+        ngen = gen.split('_')
+        gen = '$'+ngen[0]+'$_'+ngen[1]
+      else:
+        gen = '$'+gen+'$'
+      if '_' in sp:
+        nsp = sp.split('_')
+        sp = '$'+nsp[0]+'$_'+nsp[1]
+      else:
+        sp = '$'+sp+'$'
+      tax[r] = gen+' '+sp
+  yt = plt.yticks([d+0.5 for d in range(len(this_level.index))], tax)
+  yt = plt.xticks([e+0.5 for e in range(len(this_level.columns))], this_level.columns, rotation=90, fontweight='bold')
+  ti = plt.title(levels[a].capitalize(), fontweight='bold')
+  if a == 0: 
+    ax_col = plt.subplot2grid((34,7), (15,a))
+    plt.sca(ax_col)
+    cmap = mpl.cm.viridis
+    norm = mpl.colors.Normalize(vmin=0, vmax=10)#min(rclr_df.min(axis=1)), vmax=2.5)#max(rclr_df.max(axis=1)))
+    cb = mpl.colorbar.ColorbarBase(ax_col, cmap=cmap, norm=norm, orientation='horizontal')
+    tp = cb.ax.tick_params(labelsize=8)
+    st = cb.set_ticks([0, 2, 4, 6, 8, 10])
+    tl = cb.set_ticklabels(['0', '2', '4', '6', '8', '> 10'])
+    xl = plt.xlabel('Relative abundance (%)', fontsize=8, fontweight='bold')
+
+plt.subplots_adjust(wspace=1.4)
+plt.savefig(save_folder+'Heatmap all levels.png', dpi=600, bbox_inches='tight')
+
+
+```
+
+Make summary tables:
+```{python}
+levels = ['domain', 'phylum', 'class', 'order', 'family', 'genus', 'species']
+rename = {}
+groups = {}
+for sample in samples:
+  rename[sample] = sample+': '+sample_type[sample]
+  if sample_type[sample] not in groups:
+    groups[sample_type[sample]] = []
+  groups[sample_type[sample]] = groups[sample_type[sample]]+[sample+': '+sample_type[sample]]
+
+for level in levels:
+  #if level != 'domain': continue
+  relabun = pd.read_csv(save_folder+level+'_relabun.csv', index_col=0, header=0).loc[:, sample_order_overall].rename(columns=rename)
+  reads = pd.read_csv(save_folder+level+'_reads.csv', index_col=0, header=0).loc[:, sample_order_overall].rename(columns=rename)
+  for df in [relabun, reads]:
+    df['Overall mean'] = df.mean(axis=1)
+    for material in ['LDPE', 'W-LDPE', 'Wood', 'Water']:
+      df[material+' mean'] = df.loc[:, groups[material]].mean(axis=1)
+  relabun.to_csv(save_folder+'summary_reads_relabun/'+level+'_relabun.csv')
+  reads.to_csv(save_folder+'summary_reads_relabun/'+level+'_reads.csv')
+  
+  
+  
+finished = True
+```
+
+## Figure 2
+
+```{python}
+initial_reads = {'D1':69401246+69401246, 'D2':79213174+79213174, 'D3':70529765+70529765, 'D4':80327001+80327001, 'D5':84485091+84485091, 'D6':5207043+64576136+5207043+64576136, 'D7':88824725+88824725, 'D8':19093800+57219125+19093800+57219125, 'D9':70622173+70622173, 'D10':95924462+95924462, 'D11':9466307+61912021+9466307+61912021, 'D12':80332200+80332200}
+initial_reads = {k: initial_reads[k] for k in sample_order_overall}
+
+###
+card = pd.read_csv(folder+'analysis/card_annotations.csv', index_col=0, header=0)
+card = card[card.max(axis=1) > 10]
+prevalence = card.copy(deep=True)
+prevalence[prevalence > 0] = 1
+prevalence = prevalence[prevalence.sum(axis=1) > 2]
+card = card.loc[prevalence.index.values, :]
+
+info = pd.read_csv(folder+'analysis/card_information_edit_VZ2.csv', index_col=0, header=0)
+rename_info = {}
+for row in card.index.values:
+  rename_info[row] = info.loc[row, 'Drug Class Consolidated']
+
+card = card.rename(index=rename_info)
+
+card_classes_total = list(card.index.values)
+card_classes_unique = set(card_classes_total)
+classes_count = {}
+for unique_class in card_classes_unique:
+  classes_count[unique_class] = card_classes_total.count(unique_class)
+###
+
+card = pd.read_csv(folder+'analysis/card_annotations_broad_consolidated.csv', index_col=0, header=0).loc[:, sample_order_overall]
+card2 = pd.read_csv(folder+'analysis/card_annotations_filtered.csv', index_col=0, header=0).loc[:, sample_order_overall]
+
+for sample in initial_reads:
+  scale = initial_reads[sample]/1000000
+  card[sample] = card[sample]/scale
+  card2[sample] = card2[sample]/scale
+
+card.to_csv(folder+'analysis/card_annotations_broad_consilidated_RPM.csv')
+card2.to_csv(folder+'analysis/card_annotations_filtered_RPM.csv')
+
+plt.figure(figsize=(13,26))
+# ax_alpha_1 = plt.subplot2grid((104,49), (0,1), rowspan=11, colspan=8)
+# ax_alpha_2 = plt.subplot2grid((104,49), (0,13), rowspan=11, colspan=8)
+# ax_alpha_1_tt = plt.subplot2grid((104,49), (12,1), rowspan=3, colspan=8, frameon=False)
+# ax_alpha_2_tt = plt.subplot2grid((104,49), (12,13), rowspan=3, colspan=8, frameon=False)
+# ax_beta = plt.subplot2grid((104,49), (0,26), rowspan=15, colspan=23)
+
+ax_alpha_1 = plt.subplot2grid((104,49), (0,29), rowspan=11, colspan=8)
+ax_alpha_2 = plt.subplot2grid((104,49), (0,41), rowspan=11, colspan=8)
+ax_alpha_1_tt = plt.subplot2grid((104,49), (12,29), rowspan=3, colspan=8, frameon=False)
+ax_alpha_2_tt = plt.subplot2grid((104,49), (12,41), rowspan=3, colspan=8, frameon=False)
+
+ax_beta = plt.subplot2grid((104,49), (0,1), rowspan=15, colspan=23)
+
+te = ax_alpha_1.text(-0.2, 1.01, 'B', fontweight='bold', ha='center', va='bottom', transform=ax_alpha_1.transAxes, fontsize=16)
+te = ax_beta.text(-0.1, 1.01, 'A', fontweight='bold', ha='center', va='bottom', transform=ax_beta.transAxes, fontsize=16)
+te = ax_beta.text(-0.1, -0.2, 'C', fontweight='bold', ha='center', va='top', transform=ax_beta.transAxes, fontsize=16)
+ax_totals = plt.subplot2grid((104,49), (23,12), colspan=28, rowspan=3)
+ax_heatmap_ra = plt.subplot2grid((104,49), (27,12), colspan=28, rowspan=35)
+ax_num_genes = plt.subplot2grid((104,49), (27,40), colspan=8, rowspan=35)
+ax_colbar = plt.subplot2grid((104,49), (23,41), colspan=6, rowspan=1)
+
+#totals
+reads_copy = card2.copy(deep=True)
+num_reads_ARO_10 = reads_copy.sum(axis=0)
+all_ARO_10 = reads_copy.copy(deep=True)
+all_ARO_10[all_ARO_10 > 0] = 1
+num_reads_ARO_perc = pd.DataFrame(num_reads_ARO_10.copy(deep=True)).transpose()
+for col in num_reads_ARO_perc.columns:
+  num_reads_ARO_perc.loc[0, col] = (num_reads_ARO_perc.loc[0, col]/initial_reads[col])*100
+num_reads_ARO_10 = pd.DataFrame(num_reads_ARO_10).transpose()#/1000 #row2 - number of reads with AMR genes > 10 reads
+all_ARO_10 = pd.DataFrame(all_ARO_10.sum(axis=0)).transpose() #row4 - number of AMR genes with > 10 reads
+
+labels = ['Reads classified (RPM)', 'AMR genes identified']
+plt.sca(ax_totals)
+yt = plt.yticks([1, 0], labels, fontsize=10, fontweight='bold')
+yl = plt.ylim([-0.5, 1.5])
+xl = plt.xlim([-0.5, 11.5])
+count = 0
+mins = [min(list(num_reads_ARO_10.loc[0, :].values)), min(list(all_ARO_10.loc[0, :].values))]
+maxs = [max(list(num_reads_ARO_10.loc[0, :].values)), max(list(all_ARO_10.loc[0, :].values))]
+colormaps = ['Blues', 'Oranges']
+maps = []
+for m in range(len(mins)):
+  maps.append(mpl.cm.ScalarMappable(norm=mpl.colors.Normalize(vmin=mins[m], vmax=maxs[m]), cmap=mpl.cm.get_cmap(colormaps[m], 256)))
+dfs_totals = [num_reads_ARO_10, all_ARO_10]
+for sample in card.columns:
+  for d in range(len(dfs_totals)):
+    num = dfs_totals[d].loc[0, sample]
+    pb = plt.bar([count], [1], width=1, bottom=1-d-0.5, edgecolor='k', color=maps[d].to_rgba(num))
+    if num > np.mean([mins[d], maxs[d]]): text_col = 'w'
+    else: text_col = 'k'
+    if num < 1: num = round(num, 2)
+    else: num = round(num)
+    pt = plt.text(count, 1-d, str(num), color=text_col, ha='center', va='center', fontsize=8)
+  count += 1
+xt = plt.xticks([a for a in range(len(num_reads_ARO_10.columns))], [sample_type[sample].replace('Weathered ', 'W-') for sample in num_reads_ARO_10.columns], rotation=90, fontweight='bold')
+tt = ax_totals.xaxis.tick_top()
+
+#heatmap
+plt.sca(ax_heatmap_ra)
+card_ra = card.copy(deep=True)
+#card_ra = card_ra.divide(card_ra.sum(axis=0), axis=1).multiply(100)
+card_ra['Mean'] = card_ra.mean(axis=1)
+card_ra = card_ra.sort_values(by=['Mean'], ascending=True)
+card_ra = card_ra.drop(['Mean'], axis=1)
+card_ra_norm = card_ra.copy(deep=True)
+card_ra_norm = card_ra_norm.div(card_ra_norm.max(axis=1), axis=0)
+pc = plt.pcolor(card_ra_norm, edgecolor='k', cmap='cividis', vmin=0, vmax=1)
+yval = [a+0.5 for a in range(len(card_ra.index))]
+#yval.reverse()
+for y in range(len(yval)):
+  for x in range(len(card_ra.columns)):
+    if card_ra_norm.iloc[y, x] < 0.7: color='w'
+    else: color = 'k'
+    tx = plt.text(x+0.5, yval[y], round(card_ra.iloc[y, x], 2), ha='center', va='center', color=color, fontsize=8)
+
+feat_order_plot = card_ra.index.values
+feat_gene_count = []
+for feat in feat_order_plot:
+    feat_gene_count.append(' ('+str(classes_count[feat])+')')
+feat_order_plot = [f.capitalize() for f in feat_order_plot]
+feat_order_plot = [f.split(':')[0].capitalize()+':'+f.split(':')[1].capitalize() if ':' in f else f for f in feat_order_plot]
+for f in range(len(feat_order_plot)):
+  if feat_order_plot[f] == 'Disinfecting agents and intercalating dyes':
+    feat_order_plot[f] = 'Disinfecting agents & intercalating dyes'
+  feat_order_plot[f] = feat_order_plot[f]+feat_gene_count[f]
+plt_names = [f.split(' (')[0] for f in feat_order_plot]
+plt_names = [f if len(f) > 3 else f.upper() for f in plt_names]
+yt = plt.yticks(yval, plt_names, fontweight='bold')
+xt = plt.xticks([])
+xl = plt.xlabel('Abundance of ARGs giving resistance to\ndifferent drug classes in samples (RPM)', fontweight='bold')
+
+#number of genes
+plt.sca(ax_num_genes)
+print(feat_order_plot)
+for y in range(len(yval)):
+  num = int(feat_order_plot[y].split('(')[1].replace(')', ''))
+  bh = plt.barh([yval[y]], [num], color='gray')
+  pt = plt.text(num, yval[y], str(num), ha='left', va='center')
+yl = plt.ylim([0, 31])
+lx = plt.semilogx()
+xl = plt.xlim([0, 300])
+yt = plt.yticks([])
+xl = plt.xlabel('Number of genes\nin drug class', fontweight='bold')
+
+#pcoa
+anosim_all = pd.read_csv(save_folder+'Anosim_tests.csv', index_col=0, header=0)
+#anosim = [[anosim_all.iloc[4,0], anosim_all.iloc[4,1]], [anosim_all.iloc[5,0], anosim_all.iloc[5,1]]]
+anosim = [[anosim_all.iloc[5,0], anosim_all.iloc[5,1]]]
+permanova_all = pd.read_csv(save_folder+'Permanova_tests.csv', index_col=0, header=0)
+#permanova = [[permanova_all.iloc[4,1], permanova_all.iloc[4,2]], [permanova_all.iloc[5,1], permanova_all.iloc[5,2]]]
+permanova = [[permanova_all.iloc[5,1], permanova_all.iloc[5,2]]]
+axes = [ax_beta]
+db = pd.DataFrame(card2)
+diversity = ['clr']
+handles = [Line2D([0], [0], marker='s', color='w', label=name, markerfacecolor=sample_color[name], markersize=12) for name in sample_color if name != 'Weathered LDPE']
+legend_locs = ['upper right']
+text_locs = ['upper center']
+for a in range(len(axes)):
+  if diversity[a] == 'bc':
+    X = db.transpose().iloc[0:].values
+    similarities = np.nan_to_num(distance.cdist(X, X, 'braycurtis'))
+  else:
+    this_db = pd.DataFrame(db)
+    X = db.iloc[0:].values
+    this_db = rclr(X)
+    this_db = pd.DataFrame(this_db, columns=db.columns, index=db.index.values).fillna(value=0)
+    X = this_db.transpose().iloc[0:].values
+    similarities = np.nan_to_num(distance.cdist(X, X, 'euclidean'))
+  pcoa_results = ordination.pcoa(similarities)
+  PC1, PC2 = pcoa_results.samples.loc[:, 'PC1'].values, pcoa_results.samples.loc[:, 'PC2'].values
+  prop_explain1, prop_explain2 = pcoa_results.proportion_explained[0], pcoa_results.proportion_explained[1]
+  values_x, values_y = {}, {}
+  for b in range(len(PC1)):
+      name = sample_type[samples[b]]
+      color = sample_color[name]
+      if name in values_x: values_x[name] = values_x[name]+[PC1[b]]
+      else: values_x[name] = [PC1[b]]
+      if name in values_y: values_y[name] = values_y[name]+[PC2[b]]
+      else: values_y[name] = [PC2[b]]
+      sc = axes[a].scatter(PC1[b], PC2[b], color=color, edgecolor='k', s=50)
+  stats_string = 'ANOSIM: R='+str(round(float(anosim[a][0]), 3))+r', $p$='+str(round(float(anosim[a][1]), 3))+'\n'
+  stats_string += 'PERMANOVA: $R^{2}$='+str(round(float(permanova[a][0]), 3))+r', $p$='+str(round(float(permanova[a][1]), 3))
+  anchored_text = AnchoredText(stats_string.replace('\t', '   '), loc=text_locs[a], prop=dict(size=7))
+  pa = anchored_text.patch.set_boxstyle("round,pad=0.,rounding_size=0.2")
+  axes[a].add_artist(anchored_text)
+  for name in values_x:
+    el = confidence_ellipse(np.asarray(values_x[name]), np.asarray(values_y[name]), ax=axes[a], edgecolor=sample_color[name])
+  xl = axes[a].set_xlabel('PCoA1 ('+format(prop_explain1*100, '.2f')+'%)', fontweight='bold')
+  yl = axes[a].set_ylabel('PCoA2 ('+format(prop_explain2*100, '.2f')+'%)', fontweight='bold')
+  al = axes[a].legend(handles=handles, loc=legend_locs[a], fontsize=8)
+ti = axes[0].set_title("Robust Aitchison's distance", fontweight='bold')
+
+#colorbar
+plt.sca(ax_colbar)
+cmap = mpl.cm.cividis
+norm = mpl.colors.Normalize(vmin=0, vmax=1)#vmin=min(rclr_df.min(axis=1)), vmax=max(rclr_df.max(axis=1)))
+cb = mpl.colorbar.ColorbarBase(ax_colbar, cmap=cmap, norm=norm, orientation='horizontal')
+tp = cb.ax.tick_params(labelsize=6)
+xl = plt.xlabel('Proportion of maximum\nRPM for drug class', fontsize=8, fontweight='bold')
+
+# #alpha diversity T-test
+# alpha_div, alpha_div_name, alpha_y, materials, alpha_ax, alpha_ax_tt = ['chao1', 'simpson'], ['Chao1 richness', "Simpson's index of\ndiversity"], ['Richness', 'Diversity'], ['LDPE', 'W-LDPE', 'Wood', 'Water'], [ax_alpha_1, ax_alpha_2], [ax_alpha_1_tt, ax_alpha_2_tt]
+# for a in range(len(alpha_ax)):
+#   X = card2.transpose().iloc[0:].values
+#   this_alpha = alpha_diversity(alpha_div[a], X, card2.columns)
+#   alpha_split = [this_alpha[:3], this_alpha[3:6], this_alpha[6:9], this_alpha[9:]]
+#   tests = []
+#   for b in range(len(alpha_split)):
+#     this_test = []
+#     nm = 0
+#     if b == 0: nm = 0.1
+#     sc = alpha_ax[a].scatter(np.random.normal(b, nm, 3), alpha_split[b], color=sample_color[materials[b]], alpha=0.7, s=100, edgecolor='k')
+#     for c in range(len(alpha_split)):
+#       if c == b: this_test.append('')
+#       else: 
+#         T, p = ttest_ind(alpha_split[b], alpha_split[c])
+#         this_test.append(p)
+#     tests.append(this_test)
+#   for b in range(len(tests)):
+#     for c in range(len(tests[b])):
+#       if b > c: continue
+#       pv = tests[b][c]
+#       col = 'w'
+#       if pv != '':
+#         if pv <= 0.05:
+#           col = '#F1948A'
+#       ba = alpha_ax_tt[a].bar(b,1,bottom=4-c, width=1, color=col, edgecolor='k')
+#       if pv == '': continue
+#       te = alpha_ax_tt[a].text(b, 4-c+0.5, str(round(pv, 3)), ha='center', va='center', fontsize=8)
+#   plt.sca(alpha_ax[a])
+#   xt = plt.xticks([0, 1, 2, 3], [], rotation=90, fontweight='bold')
+#   xl = plt.xlim(-0.5, 3.5)
+#   yl = plt.ylabel(alpha_y[a], fontweight='bold')
+#   ti = plt.title(alpha_div_name[a], fontweight='bold')
+#   plt.sca(alpha_ax_tt[a])
+#   xt = plt.xticks([0, 1, 2, 3], materials, rotation=90, fontweight='bold')
+#   yt = plt.yticks([4.5, 3.5, 2.5, 1.5], materials, fontweight='bold')
+#   xl = plt.xlim(-0.55, 3.55)
+#   yl = plt.ylim(0.95, 5.05)
+#   if a == 0: yl = plt.ylabel('T-test $p$-values', fontweight='bold')
+  
+#alpha diversity ANOVA
+alpha_div, alpha_div_name, alpha_y, materials, alpha_ax, alpha_ax_tt = ['chao1', 'simpson'], ['Chao1 richness', "Simpson's index of\ndiversity"], ['Richness', 'Diversity'], ['LDPE', 'W-LDPE', 'Wood', 'Water'], [ax_alpha_1, ax_alpha_2], [ax_alpha_1_tt, ax_alpha_2_tt]
+text_locs = ['lower left', 'lower right']
+for a in range(len(alpha_ax)):
+  X = card2.transpose().iloc[0:].values
+  this_alpha = alpha_diversity(alpha_div[a], X, card2.columns)
+  alpha_split = [this_alpha[:3], this_alpha[3:6], this_alpha[6:9], this_alpha[9:]]
+  for b in range(len(alpha_split)):
+    nm = 0
+    if b == 0: nm = 0.1
+    sc = alpha_ax[a].scatter(np.random.normal(b, nm, 3), alpha_split[b], color=sample_color[materials[b]], alpha=0.7, s=100, edgecolor='k')
+  alpha_rename = pd.DataFrame(this_alpha.copy(deep=True)).rename(index=sample_type).transpose()
+  alpha_melt = pd.melt(alpha_rename.reset_index(), id_vars=['index'], value_vars=['LDPE', 'W-LDPE', 'Wood', 'Water'])
+  alpha_melt.columns = ['index', 'treatments', 'value']
+  alpha_melt['index'] = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
+  res = stat()
+  res.anova_stat(df=alpha_melt, res_var='value', anova_model='value ~ C(treatments)')
+  anova_summary = res.anova_summary
+  anova_f, anova_p = anova_summary.loc['C(treatments)', 'F'], anova_summary.loc['C(treatments)', 'PR(>F)']
+  anova_string = 'ANOVA:\nF='+str(round(anova_f, 3))+', $p$='+str(round(anova_p, 3))
+  anchored_text = AnchoredText(anova_string, loc=text_locs[a], prop=dict(size=7))
+  pa = anchored_text.patch.set_boxstyle("round,pad=0.,rounding_size=0.2")
+  alpha_ax[a].add_artist(anchored_text)
+  res.tukey_hsd(df=alpha_melt, res_var='value', xfac_var='treatments', anova_model='value ~ C(treatments)')
+  tukey_summary = res.tukey_summary
+  for b in range(len(materials)):
+    for c in range(len(materials)):
+      if b > c: continue
+      if b == c: pv = ''
+      else:
+        for row in tukey_summary.index.values:
+          this_row = tukey_summary.loc[row, :].values
+          if materials[b] in this_row and materials[c] in this_row:
+            pv = this_row[-1]
+      col = 'w'
+      if pv != '':
+        if pv <= 0.05:
+          col = '#F1948A'
+      ba = alpha_ax_tt[a].bar(b,1,bottom=4-c, width=1, color=col, edgecolor='k')
+      if pv == '': continue
+      te = alpha_ax_tt[a].text(b, 4-c+0.5, str(round(pv, 3)), ha='center', va='center', fontsize=8)
+  plt.sca(alpha_ax[a])
+  xt = plt.xticks([0, 1, 2, 3], [], rotation=90, fontweight='bold')
+  xl = plt.xlim(-0.5, 3.5)
+  yl = plt.ylabel(alpha_y[a], fontweight='bold')
+  ti = plt.title(alpha_div_name[a], fontweight='bold')
+  plt.sca(alpha_ax_tt[a])
+  xt = plt.xticks([0, 1, 2, 3], materials, rotation=90, fontweight='bold')
+  yt = plt.yticks([4.5, 3.5, 2.5, 1.5], materials, fontweight='bold')
+  xl = plt.xlim(-0.55, 3.55)
+  yl = plt.ylim(0.95, 5.05)
+  if a == 0: yl = plt.ylabel("Tukey's HSD\n"+"$p$-values", fontweight='bold', fontsize=8)
+finished=True
+
+plt.savefig(save_folder+'Fig2_flip_AB.png', bbox_inches='tight', dpi=600)
+
+```
+
+```{python}
+initial_reads = {'D1':69401246+69401246, 'D2':79213174+79213174, 'D3':70529765+70529765, 'D4':80327001+80327001, 'D5':84485091+84485091, 'D6':5207043+64576136+5207043+64576136, 'D7':88824725+88824725, 'D8':19093800+57219125+19093800+57219125, 'D9':70622173+70622173, 'D10':95924462+95924462, 'D11':9466307+61912021+9466307+61912021, 'D12':80332200+80332200}
+initial_reads = {k: initial_reads[k] for k in sample_order_overall}
+
+###
+# card = pd.read_csv(folder+'analysis/card_annotations.csv', index_col=0, header=0)
+# card = card[card.max(axis=1) > 10]
+# prevalence = card.copy(deep=True)
+# prevalence[prevalence > 0] = 1
+# prevalence = prevalence[prevalence.sum(axis=1) > 2]
+# card = card.loc[prevalence.index.values, :]
+
+# info = pd.read_csv(folder+'analysis/card_information_edit_VZ2.csv', index_col=0, header=0)
+rename_info = {}
+# for row in card.index.values:
+#   rename_info[row] = info.loc[row, 'Drug Class Consolidated']
+card = pd.read_csv(folder+'analysis/card_drug_reduced/card_annotations_filtered_RPM_no_mutation_edit.csv', index_col=0, header=0)
+for row in card.index.values:
+  rename_info[row] = card.loc[row, 'Drug Class Consolidated']
+card = card.drop(['Drug Class Consolidated'], axis=1)
+
+card_prev = card.copy(deep=True)
+card_prev[card_prev > 0] = 1
+card_prev.loc['Sum', :] = card_prev.sum(axis=0)
+card_prev = card_prev.loc[['Sum'], :]
+card_prev_mean = card_prev.copy(deep=True).rename(columns=sample_type).groupby(by=card_prev.columns, axis=1).mean()
+
+card_arg = card.copy(deep=True)
+card_arg = card_arg.loc[:, sample_order_overall]
+
+card = card.rename(index=rename_info)
+
+card_classes_total = list(card.index.values)
+card_classes_unique = set(card_classes_total)
+classes_count = {}
+for unique_class in card_classes_unique:
+  classes_count[unique_class] = card_classes_total.count(unique_class)
+###
+
+# card = pd.read_csv(folder+'analysis/card_annotations_broad_consolidated.csv', index_col=0, header=0).loc[:, sample_order_overall]
+# card2 = pd.read_csv(folder+'analysis/card_annotations_filtered.csv', index_col=0, header=0).loc[:, sample_order_overall]
+# 
+# for sample in initial_reads:
+#   scale = initial_reads[sample]/1000000
+#   card[sample] = card[sample]/scale
+#   card2[sample] = card2[sample]/scale
+# 
+# card.to_csv(folder+'analysis/card_annotations_broad_consilidated_RPM.csv')
+# card2.to_csv(folder+'analysis/card_annotations_filtered_RPM.csv')
+card = card.groupby(by=card.index, axis=0).sum()
+
+plt.figure(figsize=(13,26))
+# ax_alpha_1 = plt.subplot2grid((104,49), (0,1), rowspan=11, colspan=8)
+# ax_alpha_2 = plt.subplot2grid((104,49), (0,13), rowspan=11, colspan=8)
+# ax_alpha_1_tt = plt.subplot2grid((104,49), (12,1), rowspan=3, colspan=8, frameon=False)
+# ax_alpha_2_tt = plt.subplot2grid((104,49), (12,13), rowspan=3, colspan=8, frameon=False)
+# ax_beta = plt.subplot2grid((104,49), (0,26), rowspan=15, colspan=23)
+
+ax_alpha_1 = plt.subplot2grid((104,49), (0,29), rowspan=11, colspan=8)
+ax_alpha_2 = plt.subplot2grid((104,49), (0,41), rowspan=11, colspan=8)
+ax_alpha_1_tt = plt.subplot2grid((104,49), (12,29), rowspan=3, colspan=8, frameon=False)
+ax_alpha_2_tt = plt.subplot2grid((104,49), (12,41), rowspan=3, colspan=8, frameon=False)
+
+ax_beta = plt.subplot2grid((104,49), (0,1), rowspan=15, colspan=23)
+
+te = ax_alpha_1.text(-0.2, 1.01, 'B', fontweight='bold', ha='center', va='bottom', transform=ax_alpha_1.transAxes, fontsize=16)
+te = ax_beta.text(-0.1, 1.01, 'A', fontweight='bold', ha='center', va='bottom', transform=ax_beta.transAxes, fontsize=16)
+te = ax_beta.text(-0.1, -0.2, 'C', fontweight='bold', ha='center', va='top', transform=ax_beta.transAxes, fontsize=16)
+ax_totals = plt.subplot2grid((104,49), (23,12), colspan=28, rowspan=3)
+ax_heatmap_ra = plt.subplot2grid((104,49), (27,12), colspan=28, rowspan=35)
+ax_num_genes = plt.subplot2grid((104,49), (27,40), colspan=8, rowspan=35)
+ax_colbar = plt.subplot2grid((104,49), (23,41), colspan=6, rowspan=1)
+
+#totals
+reads_copy = card.copy(deep=True)
+num_reads_ARO_10 = reads_copy.sum(axis=0)
+all_ARO_10 = reads_copy.copy(deep=True)
+all_ARO_10[all_ARO_10 > 0] = 1
+num_reads_ARO_perc = pd.DataFrame(num_reads_ARO_10.copy(deep=True)).transpose()
+for col in num_reads_ARO_perc.columns:
+  num_reads_ARO_perc.loc[0, col] = (num_reads_ARO_perc.loc[0, col]/initial_reads[col])*100
+num_reads_ARO_10 = pd.DataFrame(num_reads_ARO_10).transpose()#/1000 #row2 - number of reads with AMR genes > 10 reads
+#all_ARO_10 = pd.DataFrame(all_ARO_10.sum(axis=0)).transpose() #row4 - number of AMR genes with > 10 reads
+all_ARO_10 = card_prev.rename(index={'Sum':0})
+
+labels = ['Reads classified (RPM)', 'AMR genes identified']
+plt.sca(ax_totals)
+yt = plt.yticks([1, 0], labels, fontsize=10, fontweight='bold')
+yl = plt.ylim([-0.5, 1.5])
+xl = plt.xlim([-0.5, 11.5])
+count = 0
+mins = [min(list(num_reads_ARO_10.loc[0, :].values)), min(list(all_ARO_10.loc[0, :].values))]
+maxs = [max(list(num_reads_ARO_10.loc[0, :].values)), max(list(all_ARO_10.loc[0, :].values))]
+colormaps = ['Blues', 'Oranges']
+maps = []
+for m in range(len(mins)):
+  maps.append(mpl.cm.ScalarMappable(norm=mpl.colors.Normalize(vmin=mins[m], vmax=maxs[m]), cmap=mpl.cm.get_cmap(colormaps[m], 256)))
+dfs_totals = [num_reads_ARO_10, all_ARO_10]
+for sample in card.columns:
+  for d in range(len(dfs_totals)):
+    num = dfs_totals[d].loc[0, sample]
+    pb = plt.bar([count], [1], width=1, bottom=1-d-0.5, edgecolor='k', color=maps[d].to_rgba(num))
+    if num > np.mean([mins[d], maxs[d]]): text_col = 'w'
+    else: text_col = 'k'
+    if num < 1: num = round(num, 2)
+    else: num = round(num)
+    pt = plt.text(count, 1-d, str(num), color=text_col, ha='center', va='center', fontsize=8)
+  count += 1
+xt = plt.xticks([a for a in range(len(num_reads_ARO_10.columns))], [sample_type[sample].replace('Weathered ', 'W-') for sample in num_reads_ARO_10.columns], rotation=90, fontweight='bold')
+tt = ax_totals.xaxis.tick_top()
+
+#heatmap
+plt.sca(ax_heatmap_ra)
+card_ra = card.copy(deep=True)
+#card_ra = card_ra.divide(card_ra.sum(axis=0), axis=1).multiply(100)
+card_ra['Mean'] = card_ra.mean(axis=1)
+card_ra = card_ra.sort_values(by=['Mean'], ascending=True)
+card_ra = card_ra.drop(['Mean'], axis=1)
+card_ra_norm = card_ra.copy(deep=True)
+card_ra_norm = card_ra_norm.div(card_ra_norm.max(axis=1), axis=0)
+pc = plt.pcolor(card_ra_norm, edgecolor='k', cmap='cividis', vmin=0, vmax=1)
+yval = [a+0.5 for a in range(len(card_ra.index))]
+#yval.reverse()
+for y in range(len(yval)):
+  for x in range(len(card_ra.columns)):
+    if card_ra_norm.iloc[y, x] < 0.7: color='w'
+    else: color = 'k'
+    tx = plt.text(x+0.5, yval[y], round(card_ra.iloc[y, x], 2), ha='center', va='center', color=color, fontsize=8)
+
+feat_order_plot = card_ra.index.values
+feat_gene_count = []
+for feat in feat_order_plot:
+    feat_gene_count.append(' ('+str(classes_count[feat])+')')
+feat_order_plot = [f.capitalize() for f in feat_order_plot]
+feat_order_plot = [f.split(':')[0].capitalize()+':'+f.split(':')[1].capitalize() if ':' in f else f for f in feat_order_plot]
+for f in range(len(feat_order_plot)):
+  if feat_order_plot[f] == 'Disinfecting agents and intercalating dyes':
+    feat_order_plot[f] = 'Disinfecting agents & intercalating dyes'
+  feat_order_plot[f] = feat_order_plot[f]+feat_gene_count[f]
+plt_names = [f.split(' (')[0] for f in feat_order_plot]
+plt_names = [f if len(f) > 3 else f.upper() for f in plt_names]
+yt = plt.yticks(yval, plt_names, fontweight='bold')
+xt = plt.xticks([])
+xl = plt.xlabel('Abundance of ARGs giving resistance to\ndifferent drug classes in samples (RPM)', fontweight='bold')
+
+#number of genes
+plt.sca(ax_num_genes)
+print(feat_order_plot)
+for y in range(len(yval)):
+  num = int(feat_order_plot[y].split('(')[1].replace(')', ''))
+  bh = plt.barh([yval[y]], [num], color='gray')
+  pt = plt.text(num, yval[y], str(num), ha='left', va='center')
+yl = plt.ylim([0, 21])
+lx = plt.semilogx()
+xl = plt.xlim([0.1, 300])
+yt = plt.yticks([])
+xl = plt.xlabel('Number of genes\nin drug class', fontweight='bold')
+
+#pcoa
+anosim_all = pd.read_csv(save_folder+'Anosim_tests.csv', index_col=0, header=0)
+#anosim = [[anosim_all.iloc[4,0], anosim_all.iloc[4,1]], [anosim_all.iloc[5,0], anosim_all.iloc[5,1]]]
+anosim = [[anosim_all.iloc[5,0], anosim_all.iloc[5,1]]]
+permanova_all = pd.read_csv(save_folder+'Permanova_tests.csv', index_col=0, header=0)
+#permanova = [[permanova_all.iloc[4,1], permanova_all.iloc[4,2]], [permanova_all.iloc[5,1], permanova_all.iloc[5,2]]]
+permanova = [[permanova_all.iloc[5,1], permanova_all.iloc[5,2]]]
+axes = [ax_beta]
+db = pd.DataFrame(card_arg)
+diversity = ['clr']
+handles = [Line2D([0], [0], marker='s', color='w', label=name, markerfacecolor=sample_color[name], markersize=12) for name in sample_color if name != 'Weathered LDPE']
+legend_locs = ['upper right']
+text_locs = ['upper center']
+for a in range(len(axes)):
+  if diversity[a] == 'bc':
+    X = db.transpose().iloc[0:].values
+    similarities = np.nan_to_num(distance.cdist(X, X, 'braycurtis'))
+  else:
+    this_db = pd.DataFrame(db)
+    X = db.iloc[0:].values
+    this_db = rclr(X)
+    this_db = pd.DataFrame(this_db, columns=db.columns, index=db.index.values).fillna(value=0)
+    X = this_db.transpose().iloc[0:].values
+    similarities = np.nan_to_num(distance.cdist(X, X, 'euclidean'))
+  pcoa_results = ordination.pcoa(similarities)
+  PC1, PC2 = pcoa_results.samples.loc[:, 'PC1'].values, pcoa_results.samples.loc[:, 'PC2'].values
+  prop_explain1, prop_explain2 = pcoa_results.proportion_explained[0], pcoa_results.proportion_explained[1]
+  values_x, values_y = {}, {}
+  for b in range(len(PC1)):
+      name = sample_type[samples[b]]
+      color = sample_color[name]
+      if name in values_x: values_x[name] = values_x[name]+[PC1[b]]
+      else: values_x[name] = [PC1[b]]
+      if name in values_y: values_y[name] = values_y[name]+[PC2[b]]
+      else: values_y[name] = [PC2[b]]
+      sc = axes[a].scatter(PC1[b], PC2[b], color=color, edgecolor='k', s=50)
+  stats_string = 'ANOSIM: R='+str(round(float(anosim[a][0]), 3))+r', $p$='+str(round(float(anosim[a][1]), 3))+'\n'
+  stats_string += 'PERMANOVA: $R^{2}$='+str(round(float(permanova[a][0]), 3))+r', $p$='+str(round(float(permanova[a][1]), 3))
+  anchored_text = AnchoredText(stats_string.replace('\t', '   '), loc=text_locs[a], prop=dict(size=7))
+  pa = anchored_text.patch.set_boxstyle("round,pad=0.,rounding_size=0.2")
+  axes[a].add_artist(anchored_text)
+  for name in values_x:
+    el = confidence_ellipse(np.asarray(values_x[name]), np.asarray(values_y[name]), ax=axes[a], edgecolor=sample_color[name])
+  xl = axes[a].set_xlabel('PCoA1 ('+format(prop_explain1*100, '.2f')+'%)', fontweight='bold')
+  yl = axes[a].set_ylabel('PCoA2 ('+format(prop_explain2*100, '.2f')+'%)', fontweight='bold')
+  al = axes[a].legend(handles=handles, loc=legend_locs[a], fontsize=8)
+ti = axes[0].set_title("Robust Aitchison's distance", fontweight='bold')
+
+#colorbar
+plt.sca(ax_colbar)
+cmap = mpl.cm.cividis
+norm = mpl.colors.Normalize(vmin=0, vmax=1)#vmin=min(rclr_df.min(axis=1)), vmax=max(rclr_df.max(axis=1)))
+cb = mpl.colorbar.ColorbarBase(ax_colbar, cmap=cmap, norm=norm, orientation='horizontal')
+tp = cb.ax.tick_params(labelsize=6)
+xl = plt.xlabel('Proportion of maximum\nRPM for drug class', fontsize=8, fontweight='bold')
+
+#alpha diversity ANOVA
+alpha_div, alpha_div_name, alpha_y, materials, alpha_ax, alpha_ax_tt = ['chao1', 'simpson'], ['Chao1 richness', "Simpson's index of\ndiversity"], ['Richness', 'Diversity'], ['LDPE', 'W-LDPE', 'Wood', 'Water'], [ax_alpha_1, ax_alpha_2], [ax_alpha_1_tt, ax_alpha_2_tt]
+text_locs = ['lower left', 'lower left']
+for a in range(len(alpha_ax)):
+  X = card_arg.transpose().iloc[0:].values
+  this_alpha = alpha_diversity(alpha_div[a], X, card_arg.columns)
+  alpha_split = [this_alpha[:3], this_alpha[3:6], this_alpha[6:9], this_alpha[9:]]
+  for b in range(len(alpha_split)):
+    nm = 0
+    if b == 0: nm = 0.1
+    sc = alpha_ax[a].scatter(np.random.normal(b, nm, 3), alpha_split[b], color=sample_color[materials[b]], alpha=0.7, s=100, edgecolor='k')
+  alpha_rename = pd.DataFrame(this_alpha.copy(deep=True)).rename(index=sample_type).transpose()
+  alpha_melt = pd.melt(alpha_rename.reset_index(), id_vars=['index'], value_vars=['LDPE', 'W-LDPE', 'Wood', 'Water'])
+  alpha_melt.columns = ['index', 'treatments', 'value']
+  alpha_melt['index'] = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
+  res = stat()
+  res.anova_stat(df=alpha_melt, res_var='value', anova_model='value ~ C(treatments)')
+  anova_summary = res.anova_summary
+  anova_f, anova_p = anova_summary.loc['C(treatments)', 'F'], anova_summary.loc['C(treatments)', 'PR(>F)']
+  anova_string = 'ANOVA:\nF='+str(round(anova_f, 3))+', $p$='+str(round(anova_p, 3))
+  anchored_text = AnchoredText(anova_string, loc=text_locs[a], prop=dict(size=7))
+  pa = anchored_text.patch.set_boxstyle("round,pad=0.,rounding_size=0.2")
+  alpha_ax[a].add_artist(anchored_text)
+  res.tukey_hsd(df=alpha_melt, res_var='value', xfac_var='treatments', anova_model='value ~ C(treatments)')
+  tukey_summary = res.tukey_summary
+  for b in range(len(materials)):
+    for c in range(len(materials)):
+      if b > c: continue
+      if b == c: pv = ''
+      else:
+        for row in tukey_summary.index.values:
+          this_row = tukey_summary.loc[row, :].values
+          if materials[b] in this_row and materials[c] in this_row:
+            pv = this_row[-1]
+      col = 'w'
+      if pv != '':
+        if pv <= 0.05:
+          col = '#F1948A'
+      ba = alpha_ax_tt[a].bar(b,1,bottom=4-c, width=1, color=col, edgecolor='k')
+      if pv == '': continue
+      te = alpha_ax_tt[a].text(b, 4-c+0.5, str(round(pv, 3)), ha='center', va='center', fontsize=8)
+  plt.sca(alpha_ax[a])
+  xt = plt.xticks([0, 1, 2, 3], [], rotation=90, fontweight='bold')
+  xl = plt.xlim(-0.5, 3.5)
+  yl = plt.ylabel(alpha_y[a], fontweight='bold')
+  ti = plt.title(alpha_div_name[a], fontweight='bold')
+  plt.sca(alpha_ax_tt[a])
+  xt = plt.xticks([0, 1, 2, 3], materials, rotation=90, fontweight='bold')
+  yt = plt.yticks([4.5, 3.5, 2.5, 1.5], materials, fontweight='bold')
+  xl = plt.xlim(-0.55, 3.55)
+  yl = plt.ylim(0.95, 5.05)
+  if a == 0: yl = plt.ylabel("Tukey's HSD\n"+"$p$-values", fontweight='bold', fontsize=8)
+finished=True
+
+plt.savefig(save_folder+'Fig2_flip_AB_no_mutations.png', bbox_inches='tight', dpi=600)
+
+```
+
+ANOVA:
+```{python}
+from bioinfokit.analys import stat
+print(num_reads_ARO_10, all_ARO_10)
+
+#Number of reads classified (RPM)
+nr_ARO = num_reads_ARO_10.copy(deep=True).rename(columns=sample_type)
+nr_ARO_melt = pd.melt(nr_ARO.reset_index(), id_vars=['index'], value_vars=['LDPE', 'W-LDPE', 'Wood', 'Water'])
+nr_ARO_melt.columns = ['index', 'treatments', 'value']
+nr_ARO_melt['index'] = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
+
+print('Reads classified (RPM)')
+print('One-way ANOVA')
+res = stat()
+res.anova_stat(df=nr_ARO_melt, res_var='value', anova_model='value ~ C(treatments)')
+res.anova_summary
+
+print("Tukey's HSD")
+res.tukey_hsd(df=nr_ARO_melt, res_var='value', xfac_var='treatments', anova_model='value ~ C(treatments)')
+res.tukey_summary
+
+#Number of reads classified (RPM)
+all_ARO = all_ARO_10.copy(deep=True).rename(columns=sample_type)
+all_ARO_melt = pd.melt(all_ARO.reset_index(), id_vars=['index'], value_vars=['LDPE', 'W-LDPE', 'Wood', 'Water'])
+all_ARO_melt.columns = ['index', 'treatments', 'value']
+all_ARO_melt['index'] = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
+
+print('ARGs identified')
+print('One-way ANOVA')
+res = stat()
+res.anova_stat(df=all_ARO_melt, res_var='value', anova_model='value ~ C(treatments)')
+res.anova_summary
+
+print("Tukey's HSD")
+res.tukey_hsd(df=all_ARO_melt, res_var='value', xfac_var='treatments', anova_model='value ~ C(treatments)')
+res.tukey_summary
+```
+
+## Figure 3
+
+```{python}
+card = pd.read_csv(folder+'analysis/card_drug_reduced/card_annotations_filtered_RPM_no_mutation.csv', index_col=0, header=0)
+rename_class = {}
+for dclass in list(card['Drug class']):
+  new_name = dclass.capitalize()
+  if ':' in new_name: new_name = new_name.split(':')[0].capitalize()+':'+new_name.split(':')[1].capitalize()
+  rename_class[dclass] = new_name
+
+card = card.head(20)
+card = card.replace(rename_class)
+card = card.sort_values(by=['Drug class'], ascending=False)
+card = card.drop(['Mean', 'Minimum', 'Maximum'], axis=1)
+card = card.loc[:, sample_order_overall+['Drug class']]
+
+plt.figure(figsize=(13,26))
+ax1 = plt.subplot2grid((20,8), (1,0), colspan=7, rowspan=8)
+ax2 = plt.subplot2grid((20,16), (1,14), frameon=False, rowspan=8)
+ax_colbar = plt.subplot2grid((30,8), (0,0), colspan=3, rowspan=1)
+ax_sizes = plt.subplot2grid((30,8), (0,3), colspan=4, rowspan=1)
+
+plt.sca(ax_colbar)
+cmap = mpl.cm.viridis
+norm = mpl.colors.Normalize(vmin=0, vmax=1)
+cb = mpl.colorbar.ColorbarBase(ax_colbar, cmap=cmap, norm=norm, orientation='horizontal')
+xl = plt.xlabel('Proportion of maximum for ARG', fontweight='bold')
+
+plt.sca(ax_sizes)
+mul=15
+sizes = [0.1, 1, 5, 10, 20, 30, 40]
+for a in range(len(sizes)):
+  sc = ax_sizes.scatter([a], [0], s=(mul*sizes[a]), color='k')
+plt.xlim([-0.5, 6.5]), plt.ylim([-0.5, 0.5])
+xt = plt.xticks([a for a in range(len(sizes))], sizes)
+yt = plt.yticks([])
+xl = plt.xlabel('Reads Per Million (RPM)', fontweight='bold')
+
+m = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
+
+last_drug, start = '', 0
+count = 0
+for a in range(len(card.index.values)):
+  this_drug = card.iloc[a, -1]
+  if last_drug != this_drug and last_drug != '':
+    ax2.plot([0, 0], [a-0.1-1, start+0.1], lw=5)
+    if (a-start) <= 2:
+      rotation,ha,va,xstart=0,'left','center',0.1
+    else:
+      rotation,ha,va,xstart=90,'center','center',0.3
+      rotation,ha,va,xstart=0,'left','center',0.1
+    ax2.text(xstart, np.mean([(a-1), start]), last_drug.replace(' antibiotic', '').replace('Multidrug', 'MDR'), rotation=rotation, ha=ha, va=va, fontsize=12, fontweight='bold')
+    start = a
+    count += 1
+  if a == 19:
+    #print(a, card.index.values[a], len(card.index.values))
+    li = ax2.plot([0, 0], [a-0.1, start+0.1], lw=5)
+    if (a-start) <= 2:
+      rotation,ha,va,xstart=0,'left','center',0.1
+    else:
+      rotation,ha,va,xstart=90,'center','center',0.3
+    tx = ax2.text(xstart, np.mean([(a), start]), this_drug.replace(' antibiotic', '').replace('Multidrug', 'MDR'), rotation=rotation, ha=ha, va=va, fontsize=12, fontweight='bold')
+  last_drug = this_drug
+  max_row = max(card.iloc[a, :-1].values)
+  for b in range(len(card.columns)-1):
+    num = card.iloc[a, b]
+    sc = ax1.scatter([b], [a], s=(mul*num), color=m.to_rgba(num/max_row))
+
+plt.sca(ax1)
+plt.xlim([-0.5, 11.5]), plt.ylim([-0.5, 19.5])
+
+rename_card = {'tet(C)':'tetC',
+    'MuxC':'muxC',
+    'MuxB':'muxB',
+    'MexB':'mexB',
+    'MexD':'mexD',
+    'MexF':'mexF',
+    'AxyY':'axyY',
+    "APH(3')-Ia":"aph(3')-Ia",
+    'MexC':'mexC',
+    'OpmH':'opmH'
+    }
+
+rename_ticks = []
+for a in list(card.index.values):
+  if a in rename_card: new_name = rename_card[a]
+  else: new_name = a
+  if new_name != 'OXA-543': new_name = '$'+new_name+'$'
+  rename_ticks.append(new_name)
+
+yt = plt.yticks([a for a in range(len(card.index.values))], rename_ticks, fontsize=12)
+xt = plt.xticks([a for a in range(len(card.columns)-1)], [sample_type[a] for a in list(card.columns)[:-1]], fontsize=12, fontweight='bold', rotation=90)
+
+plt.sca(ax2)
+plt.ylim([-0.5, 19.5]), plt.xlim([-0.1, 0.5])
+yt = plt.yticks([])
+xt = plt.xticks([])
+
+plt.savefig(save_folder+'Fig3.png', bbox_inches='tight', dpi=600)
+```
+
+## Run differential abundance tests CARD drug class
+
+```{python, eval=FALSE}
+card = pd.read_csv(folder+'analysis/card_annotations_broad_consilidated_RPM.csv', index_col=0, header=0)
+card_round = card.round(decimals=0)
+
+```
+
+ANCOM:
+```{R, results='hide', fig.keep='all'}
+source(paste("/Users/robynwright/Dropbox/Langille_Lab_postdoc/Github/", "ancom_v2.1.R", sep=""))
+
+ft = py$card
+md = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+colnames(md) = c('Samples', 'Groups')
+
+process = feature_table_pre_process(ft, md, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_all = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_all = ancom_out_all$out
+
+#wood vs ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'))
+md_red = md[c(1,2,3,7,8,9),]
+process = feature_table_pre_process(ft_red, md_red, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_wo_l = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_wo_l = ancom_out_wo_l$out
+
+#wood vs weathered ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6'))
+md_red = md[c(1,2,3,4,5,6),]
+process = feature_table_pre_process(ft_red, md_red, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_wo_wl = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_wo_wl = ancom_out_wo_wl$out
+
+#ldpe vs weathered ldpe
+ft_red = subset(ft, select = c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'))
+md_red = md[c(4,5,6,7,8,9),]
+process = feature_table_pre_process(ft_red, md_red, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_l_wl = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_l_wl = ancom_out_l_wl$out
+
+all = ancom_out_all[, c(1,3,4,5,6)]
+rownames(all) = ancom_out_all[,1]
+colnames(all) = c('Feature', 'All vs All 0.9', 'All vs All 0.8', 'All vs All 0.7', 'All vs All 0.6')
+
+wo_l = ancom_out_wo_l[, c(1,3,4,5,6)]
+rownames(wo_l) = ancom_out_wo_l[,1]
+colnames(wo_l) = c('Feature', 'Wood vs LDPE 0.9', 'Wood vs LDPE 0.8', 'Wood vs LDPE 0.7', 'Wood vs LDPE 0.6')
+
+wo_wl = ancom_out_wo_wl[, c(1,3,4,5,6)]
+rownames(wo_wl) = ancom_out_wo_wl[,1]
+colnames(wo_wl) = c('Feature', 'Wood vs Weathered LDPE 0.9', 'Wood vs Weathered LDPE 0.8', 'Wood vs Weathered LDPE 0.7', 'Wood vs Weathered LDPE 0.6')
+
+l_wl = ancom_out_l_wl[, c(1,3,4,5,6)]
+rownames(l_wl) = ancom_out_l_wl[,1]
+colnames(l_wl) = c('Feature', 'LDPE vs Weathered LDPE 0.9', 'LDPE vs Weathered LDPE 0.8', 'LDPE vs Weathered LDPE 0.7', 'LDPE vs Weathered LDPE 0.6')
+
+merged = merge(all, wo_l, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, wo_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, l_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+
+merged = merged[,c(5,6,7,8, 10,11,12,13, 15,16,17,18, 20,21,22,23)]
+merged[is.na(merged)] <- FALSE
+write.csv(merged, paste(py$save_folder, "ancom_card_class.csv", sep=''))
+```
+
+ALDEx2:
+```{R, eval=FALSE}
+ft = py$card_round
+md = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+colnames(md) = c('Samples', 'Groups')
+
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'))
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+results_all <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="kw", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+#wood vs ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'))
+md_red = md[c(1,2,3,7,8,9),]
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'), c('Wood', 'Wood', 'Wood', 'LDPE', 'LDPE', 'LDPE'))
+results_wo_l <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="t", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+#wood vs weathered ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6'))
+md_red = md[c(1,2,3,4,5,6),]
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D1', 'D2', 'D3','D4', 'D5', 'D6'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE'))
+results_wo_wl <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="t", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+#ldpe vs weathered ldpe
+ft_red = subset(ft, select = c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'))
+md_red = md[c(4,5,6,7,8,9),]
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'), c('W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE'))
+results_l_wl <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="t", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+all = results_all[, c(2,4)]
+colnames(all) = c('All vs All kw.eBH', 'All vs All glm.eBH')
+#row.names(all) = rownames(ft)
+
+wo_l = results_wo_l[, c(1, 10)]
+colnames(wo_l) = c('Wood vs LDPE rab.all', 'Wood vs LDPE we.eBH')
+
+wo_wl = results_wo_wl[, c(1, 10)]
+colnames(wo_wl) = c('Wood vs Weathered LDPE rab.all', 'Wood vs Weathered LDPE we.eBH')
+
+l_wl = results_l_wl[, c(1, 10)]
+colnames(l_wl) = c('LDPE vs Weathered LDPE rab.all', 'LDPE vs Weathered LDPE we.eBH')
+
+merged = merge(all, wo_l, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, wo_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, l_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+
+merged = merged[,c(4,5,7,9,11)]
+merged[is.na(merged)] <- FALSE
+write.csv(merged, paste(py$save_folder, "aldex_card_class.csv", sep=''))
+```
+
+Maaslin2 (rarefied):
+```{R, eval=FALSE}
+#maaslin seems to be a different version than it was when I previously ran it, and it now wants a reference group when running it with more than two groups - I don't want this to be against a reference so I'm just going to use the results from previously here.
+library(phyloseq)
+ft = py$card
+md = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+colnames(md) = c('Samples', 'Groups')
+rownames(md) = md[,1]
+
+# table_num = data.matrix(ft[,1:12]) #convert the ASV table to a numeric matric
+# rownames(table_num) = rownames(ft)
+# table = otu_table(table_num, taxa_are_rows = TRUE)
+# physeq = phyloseq(table)
+# physeq_rare <- rarefy_even_depth(physeq, sample.size = min(sample_sums(physeq)), replace = TRUE, trimOTUs = TRUE, verbose = TRUE)
+# table_rare = data.frame(otu_table(physeq_rare))
+# ft = table_rare
+
+feat_table = data.frame(t(ft), check.rows = F, check.names = F, stringsAsFactors = F)
+results_all <- Maaslin2(feat_table, md, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_card_class_all", transform = "AST", fixed_effects = c("Groups"), reference='Groups,Water', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+
+#wood vs ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'))
+md_red = md[c(1,2,3,7,8,9),]
+row.names(ft_red) = rownames(ft)
+feat_table <- data.frame(t(ft_red), check.rows = F, check.names = F, stringsAsFactors = F)
+results_kraken_wo_l <- Maaslin2(feat_table, md_red, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_card_class_wo_l", transform = "AST", fixed_effects = c("Groups"), reference='Groups,Wood', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+
+#wood vs weathered ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6'))
+md_red = md[c(1,2,3,4,5,6),]
+row.names(ft_red) = rownames(ft)
+feat_table <- data.frame(t(ft_red), check.rows = F, check.names = F, stringsAsFactors = F)
+results_kraken_wo_wl <- Maaslin2(feat_table, md_red, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_card_class_wo_wl", transform = "AST", fixed_effects = c("Groups"), reference='Groups,Wood', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+
+#ldpe vs weathered ldpe
+ft_red = subset(ft, select = c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'))
+md_red = md[c(4,5,6,7,8,9),]
+row.names(ft_red) = rownames(ft)
+feat_table <- data.frame(t(ft_red), check.rows = F, check.names = F, stringsAsFactors = F)
+results_kraken_l_wl <- Maaslin2(feat_table, md_red, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_card_class_l_wl", transform = "AST", fixed_effects = c("Groups"), reference='Groups,LDPE', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+```
+
+Combine Maaslin results:
+```{python}
+card = pd.read_csv(folder+'analysis/card_annotations_broad_consilidated_RPM.csv', index_col=0, header=0)
+
+maaslin_all = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_card_class_all/significant_results.tsv', index_col=0, header=0, sep='\t')
+maaslin_wo_l = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_card_class_wo_l/significant_results.tsv', index_col=0, header=0, sep='\t')
+maaslin_wo_wl = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_card_class_wo_wl/significant_results.tsv', index_col=0, header=0, sep='\t')
+maaslin_l_wl = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_card_class_l_wl/significant_results.tsv', index_col=0, header=0, sep='\t')
+
+maaslin_dfs = [maaslin_all, maaslin_wo_l, maaslin_wo_wl, maaslin_l_wl]
+maaslin_signif = []
+for df in maaslin_dfs:
+  df = df[df['qval'] <= 0.1]
+  maaslin_signif.append(list(set(list(df.index.values))))
+
+maaslin_df = []
+for amr in card.index.values:
+  row = []
+  for sig in maaslin_signif:
+    if amr in sig: row.append(1)
+    else: row.append(0)
+  maaslin_df.append(row)
+maaslin_df = pd.DataFrame(maaslin_df, columns=['All $vs$ All', 'Wood $vs$ LDPE', 'Wood $vs$ W-LDPE', 'LDPE $vs$ W-LDPE'], index=card.index.values)
+maaslin_df.to_csv(save_folder+'maaslin_card_class_0.1.csv')
+```
+
+Make plot:
+```{python}
+card = pd.read_csv(folder+'analysis/card_annotations_broad_consilidated_RPM.csv', index_col=0, header=0)
+ancom = pd.read_csv(save_folder+'ancom_card_class.csv', index_col=0, header=0)
+aldex = pd.read_csv(save_folder+'aldex_card_class.csv', index_col=0, header=0)
+maaslin = pd.read_csv(save_folder+'maaslin_card_class_0.1.csv', index_col=0, header=0)
+
+ancom = ancom.iloc[:, [2,6,10,14]]
+ancom[ancom == False] = 0
+ancom[ancom == True] = 1
+ancom = ancom.rename(columns={'All vs All 0.7':'All $vs$ All', 'Wood vs LDPE 0.7':'Wood $vs$ LDPE',
+       'Wood vs Weathered LDPE 0.7':'Wood $vs$ W-LDPE', 'LDPE vs Weathered LDPE 0.7':'LDPE $vs$ W-LDPE'})
+
+aldex = aldex.iloc[:, [1,2,3,4]]
+aldex = aldex.rename(columns={'All vs All glm.eBH':'All $vs$ All', 'Wood vs LDPE we.eBH':'Wood $vs$ LDPE',
+       'Wood vs Weathered LDPE we.eBH':'Wood $vs$ W-LDPE', 'LDPE vs Weathered LDPE we.eBH':'LDPE $vs$ W-LDPE'})
+       
+for row in aldex.index.values:
+  for col in aldex.columns:
+    if aldex.loc[row, col] <= 0.1: aldex.loc[row, col] = 1
+    else: aldex.loc[row, col] = 0
+
+combined = pd.concat([ancom, aldex, maaslin])
+combined = combined.groupby(by=combined.index, axis=0).sum()
+
+fig = plt.figure(figsize=(15,10))
+ax1 = plt.subplot2grid((20,15),(2,0),rowspan=18, colspan=10)
+ax2 = plt.subplot2grid((20,15),(2,10),rowspan=18, colspan=3)
+ax_cb1 = plt.subplot2grid((20,15),(0,0),rowspan=1, colspan=3)
+ax_cb2 = plt.subplot2grid((20,15),(0,7),rowspan=1, colspan=3)
+
+plt.sca(ax1)
+card['Mean'] = card.mean(axis=1)
+card = card.sort_values(by=['Mean'], ascending=True)
+card = card.drop(['Mean'], axis=1)
+card_norm = card.copy(deep=True)
+card_norm = card_norm.div(card_norm.max(axis=1), axis=0)
+card_norm = card_norm.loc[:, sample_order_overall]
+pc = plt.pcolor(card_norm, edgecolor='k', cmap='cividis', vmin=0, vmax=1)
+yl = plt.yticks([y+0.5 for y in range(len(card_norm.index))], [y.capitalize() if len(y) > 3 else y.replace(':a', ':A') for y in card_norm.index], fontweight='bold')
+xt = plt.xticks([x+0.5 for x in range(len(card_norm.columns))], [sample_type[x] for x in card_norm.columns], fontweight='bold', rotation=90)
+for c in range(len(card_norm.columns)):
+  col = card_norm.columns[c]
+  for r in range(len(card_norm.index)):
+    row = card_norm.index[r]
+    if card_norm.loc[row, col] <= 0.5: fc = 'w'
+    else: fc = 'k'
+    xt = plt.text(c+0.5, r+0.5, str(round(card.loc[row, col], 2)), ha='center', va='center', color=fc, fontsize=8)
+    
+combined = combined.apply(pd.to_numeric)
+plt.sca(ax2)
+pc = plt.pcolor(combined, edgecolor='k', cmap='YlGn', vmin=0, vmax=3)
+markers = ['o', '^', 's']
+marker_locs = [0.25, 0.5, 0.75]
+da_dfs = [ancom, aldex, maaslin]
+for c in range(len(combined.columns)):
+  for r in range(len(combined.index)):
+    for a in range(len(da_dfs)):
+      if combined.iloc[r,c] > 2: mc = 'w'
+      else: mc = 'k'
+      if combined.index[r] not in da_dfs[a].index: continue
+      if da_dfs[a].loc[combined.index[r], combined.columns[c]] > 0: sc = plt.scatter(c+marker_locs[a], r+0.5, marker=markers[a], s=8, color=mc)
+names = ['ANCOM-II', 'ALDEx2', 'MaAsLin2']
+handles = [Line2D([0], [0], marker=markers[n], color='w', label=names[n], markerfacecolor='k', markersize=8) for n in range(len(names))]
+xt = plt.xticks([0.5, 1.5, 2.5, 3.5], combined.columns, rotation=90, fontweight='bold')
+tt = ax2.xaxis.tick_top()
+xl = ax2.set_xlabel('Number of tools finding drug\nclass differentially abundant', fontweight='bold')    
+xl = ax2.xaxis.set_label_position('bottom') 
+yt = plt.yticks([])
+
+plt.sca(ax_cb1)
+norm = mpl.colors.Normalize(vmin=0, vmax=1)
+cb = mpl.colorbar.ColorbarBase(ax_cb1, cmap='cividis', norm=norm, orientation='horizontal')
+tp = cb.ax.tick_params(labelsize=6)
+xl = plt.title('Proportion of maximum\nRPM for drug class', fontweight='bold')
+plt.sca(ax_cb2)
+cmap_da = 'YlGn'
+norm = mpl.colors.Normalize(vmin=0, vmax=3)
+fake_df = pd.DataFrame([[0, 1, 2, 3]])
+pc = plt.pcolor(fake_df, edgecolor='k', cmap=cmap_da, vmin=0, vmax=3)
+yt = plt.yticks([])
+xt = plt.xticks([0.5, 1.5, 2.5, 3.5], [0, 1, 2, 3])
+xl = plt.title('Number of tools\nfinding drug class DA', fontweight='bold')
+lg = plt.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5,2.2), ncol=2)
+
+plt.savefig(save_folder+'card_class_heatmap.png', dpi=600, bbox_inches='tight')
+```
+
+### Run differential abundance tests CARD ARG
+
+```{python, eval=FALSE}
+card = pd.read_csv(folder+'analysis/card_annotations_filtered_RPM.csv', index_col=0, header=0)
+card_round = card.round(decimals=0)
+
+```
+
+ANCOM:
+```{R, results='hide', fig.keep='all'}
+source(paste("/Users/robynwright/Dropbox/Langille_Lab_postdoc/Github/", "ancom_v2.1.R", sep=""))
+
+ft = py$card
+md = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+colnames(md) = c('Samples', 'Groups')
+
+process = feature_table_pre_process(ft, md, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_all = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_all = ancom_out_all$out
+
+#wood vs ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'))
+md_red = md[c(1,2,3,7,8,9),]
+process = feature_table_pre_process(ft_red, md_red, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_wo_l = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_wo_l = ancom_out_wo_l$out
+
+#wood vs weathered ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6'))
+md_red = md[c(1,2,3,4,5,6),]
+process = feature_table_pre_process(ft_red, md_red, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_wo_wl = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_wo_wl = ancom_out_wo_wl$out
+
+#ldpe vs weathered ldpe
+ft_red = subset(ft, select = c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'))
+md_red = md[c(4,5,6,7,8,9),]
+process = feature_table_pre_process(ft_red, md_red, 'Samples', 'Groups', lib_cut=10, neg_lb=TRUE)
+ancom_out_l_wl = ANCOM(process$feature_table, process$meta_data, process$structure_zeros, main_var='Groups')
+ancom_out_l_wl = ancom_out_l_wl$out
+
+all = ancom_out_all[, c(1,3,4,5,6)]
+rownames(all) = ancom_out_all[,1]
+colnames(all) = c('Feature', 'All vs All 0.9', 'All vs All 0.8', 'All vs All 0.7', 'All vs All 0.6')
+
+wo_l = ancom_out_wo_l[, c(1,3,4,5,6)]
+rownames(wo_l) = ancom_out_wo_l[,1]
+colnames(wo_l) = c('Feature', 'Wood vs LDPE 0.9', 'Wood vs LDPE 0.8', 'Wood vs LDPE 0.7', 'Wood vs LDPE 0.6')
+
+wo_wl = ancom_out_wo_wl[, c(1,3,4,5,6)]
+rownames(wo_wl) = ancom_out_wo_wl[,1]
+colnames(wo_wl) = c('Feature', 'Wood vs Weathered LDPE 0.9', 'Wood vs Weathered LDPE 0.8', 'Wood vs Weathered LDPE 0.7', 'Wood vs Weathered LDPE 0.6')
+
+l_wl = ancom_out_l_wl[, c(1,3,4,5,6)]
+rownames(l_wl) = ancom_out_l_wl[,1]
+colnames(l_wl) = c('Feature', 'LDPE vs Weathered LDPE 0.9', 'LDPE vs Weathered LDPE 0.8', 'LDPE vs Weathered LDPE 0.7', 'LDPE vs Weathered LDPE 0.6')
+
+merged = merge(all, wo_l, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, wo_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, l_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+
+merged = merged[,c(5,6,7,8, 10,11,12,13, 15,16,17,18, 20,21,22,23)]
+merged[is.na(merged)] <- FALSE
+write.csv(merged, paste(py$save_folder, "ancom_card_ARG.csv", sep=''))
+```
+
+ALDEx2:
+```{R, eval=FALSE}
+ft = py$card_round
+md = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+colnames(md) = c('Samples', 'Groups')
+
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'))
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+results_all <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="kw", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+#wood vs ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'))
+md_red = md[c(1,2,3,7,8,9),]
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'), c('Wood', 'Wood', 'Wood', 'LDPE', 'LDPE', 'LDPE'))
+results_wo_l <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="t", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+#wood vs weathered ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6'))
+md_red = md[c(1,2,3,4,5,6),]
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D1', 'D2', 'D3','D4', 'D5', 'D6'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE'))
+results_wo_wl <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="t", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+#ldpe vs weathered ldpe
+ft_red = subset(ft, select = c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'))
+md_red = md[c(4,5,6,7,8,9),]
+row.names(ft_red) = rownames(ft)
+md_red = data.frame(c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'), c('W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE'))
+results_l_wl <- aldex(reads=ft_red, conditions = md_red[,2], mc.samples = 128, test="t", effect=TRUE,
+                 include.sample.summary = FALSE, verbose=T, denom="all")
+
+all = results_all[, c(2,4)]
+colnames(all) = c('All vs All kw.eBH', 'All vs All glm.eBH')
+#row.names(all) = rownames(ft)
+
+wo_l = results_wo_l[, c(1, 10)]
+colnames(wo_l) = c('Wood vs LDPE rab.all', 'Wood vs LDPE we.eBH')
+
+wo_wl = results_wo_wl[, c(1, 10)]
+colnames(wo_wl) = c('Wood vs Weathered LDPE rab.all', 'Wood vs Weathered LDPE we.eBH')
+
+l_wl = results_l_wl[, c(1, 10)]
+colnames(l_wl) = c('LDPE vs Weathered LDPE rab.all', 'LDPE vs Weathered LDPE we.eBH')
+
+merged = merge(all, wo_l, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, wo_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+merged = merge(merged, l_wl, by=0, all=TRUE)
+rownames(merged) = merged[,1]
+
+merged = merged[,c(4,5,7,9,11)]
+merged[is.na(merged)] <- FALSE
+write.csv(merged, paste(py$save_folder, "aldex_card_ARG.csv", sep=''))
+```
+
+Maaslin2:
+```{R, eval=FALSE}
+library(phyloseq)
+ft = py$card
+md = data.frame(c('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'), c('Wood', 'Wood', 'Wood', 'W_LDPE', 'W_LDPE', 'W_LDPE', 'LDPE', 'LDPE', 'LDPE', 'Water', 'Water', 'Water'))
+colnames(md) = c('Samples', 'Groups')
+rownames(md) = md[,1]
+
+feat_table = data.frame(t(ft), check.rows = F, check.names = F, stringsAsFactors = F)
+results_all <- Maaslin2(feat_table, md, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_card_ARG_all", transform = "AST", fixed_effects = c("Groups"), reference='Groups,Water', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+
+#wood vs ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D7', 'D8', 'D9'))
+md_red = md[c(1,2,3,7,8,9),]
+row.names(ft_red) = rownames(ft)
+feat_table <- data.frame(t(ft_red), check.rows = F, check.names = F, stringsAsFactors = F)
+results_kraken_wo_l <- Maaslin2(feat_table, md_red, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_card_ARG_wo_l", transform = "AST", fixed_effects = c("Groups"), reference='Groups,Wood', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+
+#wood vs weathered ldpe
+ft_red = subset(ft, select = c('D1', 'D2', 'D3', 'D4', 'D5', 'D6'))
+md_red = md[c(1,2,3,4,5,6),]
+row.names(ft_red) = rownames(ft)
+feat_table <- data.frame(t(ft_red), check.rows = F, check.names = F, stringsAsFactors = F)
+results_kraken_wo_wl <- Maaslin2(feat_table, md_red, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_card_ARG_wo_wl", transform = "AST", fixed_effects = c("Groups"), reference='Groups,Wood', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+
+#ldpe vs weathered ldpe
+ft_red = subset(ft, select = c('D4', 'D5', 'D6', 'D7', 'D8', 'D9'))
+md_red = md[c(4,5,6,7,8,9),]
+row.names(ft_red) = rownames(ft)
+feat_table <- data.frame(t(ft_red), check.rows = F, check.names = F, stringsAsFactors = F)
+results_kraken_l_wl <- Maaslin2(feat_table, md_red, "/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/analysis/figures_AMR_Nov22/maaslin_card_ARG_l_wl", transform = "AST", fixed_effects = c("Groups"), reference='Groups,LDPE', standardize = FALSE, plot_heatmap = F, plot_scatter = F)
+```
+
+Combine Maaslin results:
+```{python}
+card = pd.read_csv(folder+'analysis/card_annotations_filtered_RPM.csv', index_col=0, header=0)
+
+maaslin_all = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_card_ARG_all/significant_results.tsv', index_col=0, header=0, sep='\t')
+maaslin_wo_l = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_card_ARG_wo_l/significant_results.tsv', index_col=0, header=0, sep='\t')
+maaslin_wo_wl = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_card_ARG_wo_wl/significant_results.tsv', index_col=0, header=0, sep='\t')
+maaslin_l_wl = pd.read_csv(folder+'analysis/figures_AMR_Nov22/maaslin_card_ARG_l_wl/significant_results.tsv', index_col=0, header=0, sep='\t')
+
+maaslin_dfs = [maaslin_all, maaslin_wo_l, maaslin_wo_wl, maaslin_l_wl]
+maaslin_signif = []
+for df in maaslin_dfs:
+  df = df[df['qval'] <= 0.1]
+  maaslin_signif.append(list(set(list(df.index.values))))
+
+maaslin_df = []
+for amr in card.index.values:
+  row = []
+  for sig in maaslin_signif:
+    if amr in sig: row.append(1)
+    else: row.append(0)
+  maaslin_df.append(row)
+maaslin_df = pd.DataFrame(maaslin_df, columns=['All $vs$ All', 'Wood $vs$ LDPE', 'Wood $vs$ W-LDPE', 'LDPE $vs$ W-LDPE'], index=card.index.values)
+maaslin_df.to_csv(save_folder+'maaslin_card_ARG_0.1.csv')
+```
+
+Make plot:
+```{python}
+card = pd.read_csv(folder+'analysis/card_drug_reduced/card_annotations_filtered_RPM_no_mutation.csv', index_col=0, header=0).drop(['Mean', 'Minimum', 'Maximum', 'Drug class'], axis=1)
+card = card.head(20)
+
+ancom = pd.read_csv(save_folder+'ancom_card_ARG.csv', index_col=0, header=0)
+aldex = pd.read_csv(save_folder+'aldex_card_ARG.csv', index_col=0, header=0)
+maaslin = pd.read_csv(save_folder+'maaslin_card_ARG_0.1.csv', index_col=0, header=0)
+
+ancom = ancom.iloc[:, [2,6,10,14]]
+ancom[ancom == False] = 0
+ancom[ancom == True] = 1
+ancom = ancom.rename(columns={'All vs All 0.7':'All $vs$ All', 'Wood vs LDPE 0.7':'Wood $vs$ LDPE',
+       'Wood vs Weathered LDPE 0.7':'Wood $vs$ W-LDPE', 'LDPE vs Weathered LDPE 0.7':'LDPE $vs$ W-LDPE'})
+
+aldex = aldex.iloc[:, [1,2,3,4]]
+aldex = aldex.rename(columns={'All vs All glm.eBH':'All $vs$ All', 'Wood vs LDPE we.eBH':'Wood $vs$ LDPE',
+       'Wood vs Weathered LDPE we.eBH':'Wood $vs$ W-LDPE', 'LDPE vs Weathered LDPE we.eBH':'LDPE $vs$ W-LDPE'})
+
+for row in aldex.index.values:
+  for col in aldex.columns:
+    if aldex.loc[row, col] <= 0.1: aldex.loc[row, col] = 1
+    else: aldex.loc[row, col] = 0
+
+combined = pd.concat([ancom, aldex, maaslin])
+combined = combined.groupby(by=combined.index, axis=0).sum()
+
+fig = plt.figure(figsize=(15,10))
+ax1 = plt.subplot2grid((20,15),(2,0),rowspan=18, colspan=10)
+ax2 = plt.subplot2grid((20,15),(2,10),rowspan=18, colspan=3)
+ax_cb1 = plt.subplot2grid((20,15),(0,0),rowspan=1, colspan=3)
+ax_cb2 = plt.subplot2grid((20,15),(0,7),rowspan=1, colspan=3)
+
+plt.sca(ax1)
+card['Mean'] = card.mean(axis=1)
+card = card.sort_values(by=['Mean'], ascending=True)
+card = card.drop(['Mean'], axis=1)
+card_norm = card.copy(deep=True)
+card_norm = card_norm.div(card_norm.max(axis=1), axis=0)
+card_norm = card_norm.loc[:, sample_order_overall]
+pc = plt.pcolor(card_norm, edgecolor='k', cmap='cividis', vmin=0, vmax=1)
+yl = plt.yticks([y+0.5 for y in range(len(card_norm.index))], [y.replace('M', 'm').replace('Op', 'op').replace('(C)', 'C').replace('Ax', 'ax') for y in card_norm.index], fontweight='bold')
+xt = plt.xticks([x+0.5 for x in range(len(card_norm.columns))], [sample_type[x] for x in card_norm.columns], fontweight='bold', rotation=90)
+for c in range(len(card_norm.columns)):
+  col = card_norm.columns[c]
+  for r in range(len(card_norm.index)):
+    row = card_norm.index[r]
+    if card_norm.loc[row, col] <= 0.5: fc = 'w'
+    else: fc = 'k'
+    xt = plt.text(c+0.5, r+0.5, str(round(card.loc[row, col], 2)), ha='center', va='center', color=fc, fontsize=8)
+
+combined = combined.apply(pd.to_numeric).loc[card.index, :]
+plt.sca(ax2)
+pc = plt.pcolor(combined, edgecolor='k', cmap='YlGn', vmin=0, vmax=3)
+markers = ['o', '^', 's']
+marker_locs = [0.25, 0.5, 0.75]
+da_dfs = [ancom, aldex, maaslin]
+for c in range(len(combined.columns)):
+  for r in range(len(combined.index)):
+    for a in range(len(da_dfs)):
+      if combined.iloc[r,c] > 2: mc = 'w'
+      else: mc = 'k'
+      if combined.index[r] not in da_dfs[a].index: continue
+      if da_dfs[a].loc[combined.index[r], combined.columns[c]] > 0: sc = plt.scatter(c+marker_locs[a], r+0.5, marker=markers[a], s=8, color=mc)
+names = ['ANCOM-II', 'ALDEx2', 'MaAsLin2']
+handles = [Line2D([0], [0], marker=markers[n], color='w', label=names[n], markerfacecolor='k', markersize=8) for n in range(len(names))]
+xt = plt.xticks([0.5, 1.5, 2.5, 3.5], combined.columns, rotation=90, fontweight='bold')
+tt = ax2.xaxis.tick_top()
+xl = ax2.set_xlabel('Number of tools finding\nARG differentially abundant', fontweight='bold')
+xl = ax2.xaxis.set_label_position('bottom')
+yt = plt.yticks([])
+
+plt.sca(ax_cb1)
+norm = mpl.colors.Normalize(vmin=0, vmax=1)
+cb = mpl.colorbar.ColorbarBase(ax_cb1, cmap='cividis', norm=norm, orientation='horizontal')
+tp = cb.ax.tick_params(labelsize=6)
+xl = plt.title('Proportion of maximum\nRPM for ARG', fontweight='bold')
+plt.sca(ax_cb2)
+cmap_da = 'YlGn'
+norm = mpl.colors.Normalize(vmin=0, vmax=3)
+fake_df = pd.DataFrame([[0, 1, 2, 3]])
+pc = plt.pcolor(fake_df, edgecolor='k', cmap=cmap_da, vmin=0, vmax=3)
+yt = plt.yticks([])
+xt = plt.xticks([0.5, 1.5, 2.5, 3.5], [0, 1, 2, 3])
+xl = plt.title('Number of tools\nfinding ARG DA', fontweight='bold')
+lg = plt.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5,2.2), ncol=2)
+
+
+plt.savefig(save_folder+'card_ARG_heatmap.png', dpi=600, bbox_inches='tight')
+```

@@ -1,0 +1,852 @@
+---
+title: Sowe read-based analyses
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+fig_width: 10
+fig_height: 10
+---
+
+# Trimmomatic
+
+```{bash, eval=FALSE}
+parallel -j 1 --link 'java -jar /home/vinko/tools/Trimmomatic-0.39/trimmomatic-0.39.jar PE {1} {2} trimmed_reads/{1/.}_paired.fq.gz trimmed_reads/{1/.}_unpaired.fq.gz trimmed_reads/{2/.}_paired.fq.gz trimmed_reads/{2/.}_unpaired.fq.gz  ILLUMINACLIP:/home/vinko/tools/Trimmomatic-0.39/adapters/TruSeq3-PE.fa:2:30:10:2:keepBothReads LEADING:3 TRAILING:3 MINLEN:36 -threads 12' ::: raw_files/*_1.fq.gz ::: raw_files/*_2.fq.gz
+```
+
+# Rename
+
+```{python, eval=FALSE}
+import os
+files = os.listdir('trimmed_reads/')
+unique_files = set([f.split('.')[0] for f in files if 'unpaired' not in f])
+unique_files = [f for f in unique_files if f[-1] == '1']
+
+for f in unique_files:
+  R1_old = f+'.fq_paired.fq.gz'
+  R2_old = f[:-1]+'2.fq_paired.fq.gz'
+  R1_new = R1_old.split('_')[0]+'_R1.fq.gz'
+  R2_new = R2_old.split('_')[0]+'_R2.fq.gz'
+  cmd1 = 'mv trimmed_reads/'+R1_old+' trimmed_reads/'+R1_new
+  cmd2 = 'mv trimmed_reads/'+R2_old+' trimmed_reads/'+R2_new
+  os.system(cmd1)
+  os.system(cmd2)
+```
+
+# SPADES
+
+Run on the Compute Canada server using a script to create and run sbatch files:
+```{python, eval=FALSE}
+import os
+
+sample_names = ['D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12']
+direc = '/home/rwright/scratch/vinko/'
+
+for sample in sample_names:
+    r1, r2 = direc+'all_reads/trimmed_reads/'+sample+'_R1.fq.gz', direc+'all_reads/trimmed_reads/'+sample+'_R2.fq.gz'
+    str = '#!/bin/bash\n'
+    str += '#SBATCH --job-name='+sample+'_spades.job\n'
+    str += '#SBATCH --output='+direc+'out/'+sample+'_spades.out\n'
+    str += '#SBATCH --error='+direc+'out/'+sample+'_spades.err\n'
+    str += '#SBATCH --mem=450G\n'
+    str += '#SBATCH --time=7-0:00\n'
+    str += '#SBATCH --cpus-per-task=32\n'
+    str += '#SBATCH --mail-user=robyn.wright@dal.ca\n'
+    str += '#SBATCH --mail-user=vinko.zadjelovic-varas@warwick.ac.uk\n'
+    str += '#SBATCH --mail-type=ALL\n'
+    str += 'conda activate spades\n'
+    str += 'source activate spades\n'
+    str += 'mkdir '+direc+'/spades_out/'+sample+'\n'
+    str += '/home/rwright/anaconda3/envs/spades/bin/spades.py --meta -1 '+r1+' -2 '+r2+' -o '+direc+'spades_out/'+sample+'/ -t 32'+'\n'
+    with open(sample+'_spades.job', 'w') as f:
+        f.write(str)
+    os.system('sbatch '+sample+'_spades.job')
+```
+
+# Join reads
+
+```{bash, eval=FALSE}
+concat_paired_end.pl -p 4 -o joined_reads trimmed_reads/*_R*.fq.gz
+```
+
+# HUMAnN3
+
+Run on the Compute Canada server using a script to create and run sbatch files:
+```{python, eval=FALSE}
+import os
+
+sample_names = ['D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12']
+#sample_names = ['D7', 'D10', 'D12']
+direc = '/home/rwright/scratch/vinko/'
+
+for sample in sample_names:
+    f = direc+'all_reads/joined_reads/'+sample+'.fq.gz'
+    string = '#!/bin/bash\n'
+    string += '#SBATCH --job-name='+sample+'_humann.job\n'
+    string += '#SBATCH --output='+direc+'out/'+sample+'_humann.out\n'
+    string += '#SBATCH --error='+direc+'out/'+sample+'_humann.err\n'
+    string += '#SBATCH --mem=120G\n'
+    string += '#SBATCH --time=7-0:00\n'
+    string += '#SBATCH --cpus-per-task=24\n'
+    string += '#SBATCH --mail-user=robyn.wright@dal.ca\n'
+    string += '#SBATCH --mail-user=vinko.zadjelovic-varas@warwick.ac.uk\n'
+    string += '#SBATCH --mail-type=ALL\n'
+    string += 'conda activate biobakery3\n'
+    string += 'source activate biobakery3\n'
+    string += 'mkdir '+direc+'/humann_out/'+sample+'\n'
+    string += 'humann --input '+f+' --output '+direc+'humann_out/'+sample+' --threads 24 --nucleotide-database /home/rwright/scratch/databases/HUMANN/chocophlan_new/ --protein-database /home/rwright/scratch/databases/HUMANN/uniref_new/ --bowtie2 /home/rwright/tools/bowtie2-2.2.9/'+'\n'
+    #string += 'humann --input '+f+' --output '+direc+'humann_out/'+sample+' --threads 24 --nucleotide-database /home/rwright/scratch/databases/HUMANN/chocophlan_new/ --protein-database /home/rwright/scratch/databases/HUMANN/uniref_new/ --bowtie2 /home/rwright/tools/bowtie2-2.2.9/ --resume'+'\n'
+    with open(sample+'_humann.job', 'w') as f:
+        f.write(string)
+    os.system('sbatch '+sample+'_humann.job')
+```
+
+Note that most required running probably 5 times (for a week each) with the `--resume` option in order to complete.
+
+Combine tables:
+```{bash, eval=FALSE}
+humann_join_tables -s --input to_copy/ --file_name pathabundance --output humann3_pathabundance.tsv
+humann_join_tables -s --input to_copy/ --file_name pathcoverage --output humann3_pathcoverage.tsv
+humann_join_tables -s --input to_copy/ --file_name genefamilies --output humann3_genefamilies.tsv
+
+#humann_regroup_table --input humann3_genefamilies.tsv --output humann3_genefamilies_KO.tsv --groups uniref90_rxn
+
+humann_renorm_table --input humann3_pathabundance.tsv --units relab --output humann3_pathabundance_relab.tsv
+humann_split_stratified_table --input humann3_pathabundance_relab.tsv --output ./
+
+humann_renorm_table --input humann3_genefamilies.tsv --units relab --output humann3_genefamilies_relab.tsv
+humann_split_stratified_table --input humann3_genefamilies_relab.tsv --output ./
+
+humann_regroup_table --input humann3_genefamilies.tsv --output humann3_genefamilies_ko_50.tsv -c /home/rwright/scratch/databases/HUMANN/utility_mapping_new/map_ko_uniref50.txt.gz
+humann_regroup_table --input humann3_genefamilies.tsv --output humann3_genefamilies_ko_90.tsv -c /home/rwright/scratch/databases/HUMANN/utility_mapping_new/map_ko_uniref90.txt.gz
+
+humann_renorm_table --input humann3_genefamilies_ko_50.tsv --units relab --output humann3_genefamilies_ko_50_relab.tsv
+humann_split_stratified_table --input humann3_genefamilies_ko_50_relab.tsv --output ./
+
+humann_renorm_table --input humann3_genefamilies_ko_90.tsv --units relab --output humann3_genefamilies_ko_90_relab.tsv
+humann_split_stratified_table --input humann3_genefamilies_ko_90_relab.tsv --output ./
+```
+
+# Kraken2
+
+This is using a database built using [V205 of NCBI RefSeq](https://ftp.ncbi.nlm.nih.gov/refseq/release/release-notes/archive/RefSeq-release205.txt), so it includes 108,257 organisms. This includes all domains (fungi, invertebrate, plant, protozoa, vertebrate_mammalian, vertebrate_other, viral, bacteria, archaeae and also nt and UniVec_Core). It requires ~1.2 TB RAM to run.
+
+```{bash, eval=FALSE}
+mkdir kraken2_outraw
+mkdir kraken2_kreport
+
+parallel -j 1 'kraken2 --use-names --threads 24 --db /scratch/ramdisk/Kraken2_RefSeqCompleteV205/ --memory-mapping {1} --output kraken2_outraw/{1/.}_refseq_{2}.kraken.txt --report kraken2_kreport/{1/.}_refseq_{2}.kreport --confidence {2} --report-minimizer-data' ::: joined_reads/*.fq ::: 0.0 0.1 0.2 0.3 0.4 0.5
+```
+
+We also used a confidence threshold of 0.5 as this is what we have found in other research to be most appropriate at both reducing false positives and not removing all classified reads.
+
+# Bracken
+
+```{bash, eval=FALSE}
+parallel -j 10 'bracken -d  /scratch/ramdisk/Kraken2_RefSeqCompleteV205/ -i {} -l S -o {.}.bracken -r 150' ::: kraken2_kreport/*.kreport
+```
+
+# MMSeqs
+
+## Single sample
+
+Install MEGAN and MMSeqs2:
+```{bash, eval=FALSE}
+conda install -c bioconda megan
+conda install -c conda-forge -c bioconda mmseqs2
+```
+
+Generate job files:
+```{bash, eval=FALSE}
+/usr/bin/perl /home/dhwani/MyGit/MH2_test/run_TaxonomyFunctionSearchMegan.pl \
+    --mapmethod mmseqs --db /home/dhwani/databases/mmseqsUniref90DB -p 8 \
+    -o mmseqs_U90_out joined_reads_fasta/D1.fasta
+```
+
+Run:
+```{bash, eval=FALSE}
+./mmseqs-D1.fasta-2021-08-24-09-58-23-jobfile.sh
+```
+
+## Other samples
+
+Generate job files:
+```{bash, eval=FALSE}
+/usr/bin/perl /home/dhwani/MyGit/MH2_test/run_TaxonomyFunctionSearchMegan.pl \
+    --mapmethod mmseqs --db /home/dhwani/databases/mmseqsUniref90DB -p 12 \
+    -o mmseqs_U90_out joined_reads_fasta/*.fasta
+```
+
+Run:
+```{bash, eval=FALSE}
+parallel -j 1 --progress './{}' ::: *.sh
+```
+
+Run separately:
+```{bash, eval=FALSE}
+./mmseqs-D3.fasta-2021-08-27-15-01-17-jobfile.sh
+./mmseqs-D4.fasta-2021-08-27-15-01-17-jobfile.sh
+
+mkdir mmseqs_U90_out/mmseqs_D3
+mkdir mmseqs_U90_out/mmseqs_D4
+
+mv mmseqs_U90_out/mmseqs-D3* mmseqs_U90_out/mmseqs_D3
+mv mmseqs_U90_out/mmseqs-D4* mmseqs_U90_out/mmseqs_D4
+
+sudo cp mmseqs_U90_out/mmseqs_D3/mmseqs-D3.fasta-s1.m8 /home/storage/robyn/vinko/mmseqs_m8/
+
+sudo tar -czvf mmseqs_D3.tar.gz mmseqs_U90_out/mmseqs_D3/
+
+sudo cp mmseqs_U90_out/mmseqs_D4/mmseqs-D4.fasta-s1.m8 /home/storage/robyn/vinko/mmseqs_m8/
+sudo tar -czvf /home/storage/robyn/vinko/mmseqs_D4.tar.gz mmseqs_U90_out/mmseqs_D4/
+
+rm -r mmsmmseqs_U90_out/*
+
+mv mmseqs-D3.fasta-2021-08-27-15-01-17-jobfile.sh mmseqs-job-files/
+mv mmseqs-D4.fasta-2021-08-27-15-01-17-jobfile.sh mmseqs-job-files/
+
+
+
+./mmseqs-D5.fasta-2021-08-27-15-01-17-jobfile.sh
+./mmseqs-D6.fasta-2021-08-27-15-01-17-jobfile.sh
+
+mkdir mmseqs_U90_out/mmseqs_D5
+mkdir mmseqs_U90_out/mmseqs_D6
+
+mv mmseqs_U90_out/mmseqs-D5* mmseqs_U90_out/mmseqs_D5
+mv mmseqs_U90_out/mmseqs-D6* mmseqs_U90_out/mmseqs_D6
+
+sudo cp mmseqs_U90_out/mmseqs_D5/mmseqs-D5.fasta-s1.m8 /home/storage/robyn/vinko/mmseqs_m8/
+sudo cp mmseqs_U90_out/mmseqs_D6/mmseqs-D6.fasta-s1.m8 /home/storage/robyn/vinko/mmseqs_m8/
+
+sudo tar -czvf /home/storage/robyn/vinko/mmseqs_D5.tar.gz mmseqs_U90_out/mmseqs_D5/
+sudo tar -czvf /home/storage/robyn/vinko/mmseqs_D6.tar.gz mmseqs_U90_out/mmseqs_D6/
+
+rm -r mmsmmseqs_U90_out/*
+
+mv mmseqs-D5.fasta-2021-08-27-15-01-17-jobfile.sh mmseqs-job-files/
+mv mmseqs-D6.fasta-2021-08-27-15-01-17-jobfile.sh mmseqs-job-files/
+
+
+
+./mmseqs-D7.fasta-2021-08-27-15-01-17-jobfile.sh
+./mmseqs-D8.fasta-2021-08-27-15-01-17-jobfile.sh
+./mmseqs-D9.fasta-2021-08-27-15-01-17-jobfile.sh
+
+mkdir mmseqs_U90_out/mmseqs_D7
+mkdir mmseqs_U90_out/mmseqs_D8
+mkdir mmseqs_U90_out/mmseqs_D9
+
+mv mmseqs_U90_out/mmseqs-D7* mmseqs_U90_out/mmseqs_D7
+mv mmseqs_U90_out/mmseqs-D8* mmseqs_U90_out/mmseqs_D8
+mv mmseqs_U90_out/mmseqs-D9* mmseqs_U90_out/mmseqs_D9
+
+sudo cp mmseqs_U90_out/mmseqs_D7/mmseqs-D7.fasta-s1.m8 /home/storage/robyn/vinko/mmseqs_m8/
+sudo cp mmseqs_U90_out/mmseqs_D8/mmseqs-D8.fasta-s1.m8 /home/storage/robyn/vinko/mmseqs_m8/
+sudo cp mmseqs_U90_out/mmseqs_D9/mmseqs-D9.fasta-s1.m8 /home/storage/robyn/vinko/mmseqs_m8/
+
+sudo tar -czvf /home/storage/robyn/vinko/mmseqs_D7.tar.gz mmseqs_U90_out/mmseqs_D7/
+sudo tar -czvf /home/storage/robyn/vinko/mmseqs_D8.tar.gz mmseqs_U90_out/mmseqs_D8/
+sudo tar -czvf /home/storage/robyn/vinko/mmseqs_D9.tar.gz mmseqs_U90_out/mmseqs_D9/
+
+rm -r mmsmmseqs_U90_out/*
+
+mv mmseqs-D7.fasta-2021-08-27-15-01-17-jobfile.sh mmseqs-job-files/
+mv mmseqs-D8.fasta-2021-08-27-15-01-17-jobfile.sh mmseqs-job-files/
+mv mmseqs-D9.fasta-2021-08-27-15-01-17-jobfile.sh mmseqs-job-files/
+```
+
+## Pick the top functional hit for each read
+
+```{bash, eval=FALSE}
+mkdir mmseqs_U90_out_tophit
+parallel -j 2 --progress 'python /home/dhwani/MyGit/MH2_test/pick_uniref_top_hit.py --unirefm8Dir /home/storage/robyn/vinko/mmseqs_m8/{}/ --output_path mmseqs_U90_out_tophit/' ::: D1 D2 D3 D4 D5 D6 D7 D8 D9 D10 D11 D12
+```
+
+## Go through and make new kraken outraw files that give the confidence for each taxonomic assignment
+
+```{python, eval=FALSE}
+import os
+
+kraken_db = '/home/shared/Kraken2_RefSeqCompleteV205/'
+sample_direc = '/home/storage/robyn/vinko/kraken2_outraw_V205_all_conf/'
+new_sample_direc = '/home/robyn/vinko/kraken2_outraw_conf/'
+nodes = 'taxonomy/nodes.dmp'
+parent_dict, child_dict, id_rank = {}, {}, {}
+
+for line in open(kraken_db+nodes, "r"):
+  line = line.split('|')
+  parent_dict[line[0].replace('\t', '')] = line[1].replace('\t', '')
+  child_dict[line[1].replace('\t', '')] = line[0].replace('\t', '')
+  id_rank[line[0].replace('\t', '')] = line[2].replace('\t', '')
+
+samples = [s for s in os.listdir(sample_direc) if '0.0' in s]
+for sample in samples:
+  #if 'D1_' not in sample: continue
+  new_lines = []
+  count = 0
+  new_fn = new_sample_direc+sample.replace('kraken.txt', 'conf.kraken.txt')
+  new_fn_didnt_add = new_sample_direc+sample.replace('kraken.txt', 'broken.kraken.txt')
+  with open(new_fn, 'w') as f:
+    f.write('')
+  with open(new_fn_didnt_add, 'w') as f:
+    f.write('')
+  for line in open(sample_direc+sample, 'r'):
+    #if count > 100: continue
+    new_line = line.split('\t')
+    if new_line[0] == 'C':
+      try:
+        classif = new_line[2]
+        classif_taxid = classif.split('(taxid ')[1].replace(')', '')
+        minimizers = new_line[4].replace('\n', '').split(' ')
+        taxids = [mini.split(':')[0] for mini in minimizers]
+        sums = {}
+        total = 0
+        for mini in minimizers:
+          if mini.split(':')[0] in sums:
+            sums[mini.split(':')[0]] = sums[mini.split(':')[0]]+int(mini.split(':')[1])
+          else:
+            sums[mini.split(':')[0]] = int(mini.split(':')[1])
+          total += int(mini.split(':')[1])
+        strain = False
+        try:
+          if id_rank[classif_taxid] == 'strain':
+            strain = True
+        except: do_nothing = True
+        if classif_taxid not in sums: sums[classif_taxid] = 0
+        if not strain:
+          for tid in sums:
+            if tid == classif_taxid: continue
+            this_sum = sums[tid]
+            for a in range(20):
+              try:
+                if parent_dict[tid] == classif_taxid:
+                  sums[classif_taxid] += this_sum
+                  break
+                else:
+                  tid = parent_dict[tid]
+              except: continue
+        conf = sums[classif_taxid]/total
+        new_line[2] = new_line[2]+':'+str(round(conf, 2))
+        this_new_line = ''
+        for a in range(len(new_line)):
+          if a != len(new_line)-1:
+            this_new_line += new_line[a]+'\t'
+          else: this_new_line += new_line[a]+'\n'
+        with open(new_fn, 'a') as f:
+          f.write(this_new_line)
+      except:
+        with open(new_fn_didnt_add, 'a') as f:
+          f.write(line)
+    else:
+      with open(new_fn, 'a') as f:
+        f.write(line)
+    count += 1
+```
+
+We had a load that didn't work with this and it was because they had A's in them (for ambiguous minimizer classifications), so we'll just re-run the same thing on them but allowing for the A's now and also not over-writing the previous files. There was also an issue when the minimizer information field had a '' in it, so fixed that too:
+```{python, eval=FALSE}
+import os
+
+kraken_db = '/home/shared/Kraken2_RefSeqCompleteV205/'
+sample_direc = '/home/robyn/vinko/kraken2_outraw_conf/'
+new_sample_direc = '/home/robyn/vinko/kraken2_outraw_conf/'
+nodes = 'taxonomy/nodes.dmp'
+parent_dict, child_dict, id_rank = {}, {}, {}
+
+for line in open(kraken_db+nodes, "r"):
+  line = line.split('|')
+  parent_dict[line[0].replace('\t', '')] = line[1].replace('\t', '')
+  child_dict[line[1].replace('\t', '')] = line[0].replace('\t', '')
+  id_rank[line[0].replace('\t', '')] = line[2].replace('\t', '')
+
+samples = [s for s in os.listdir(sample_direc) if 'broken' in s]
+for sample in samples:
+  #if 'D1_' not in sample: continue
+  new_lines = []
+  count = 0
+  new_fn = new_sample_direc+sample.replace('broken', 'conf')
+  new_fn_didnt_add = new_sample_direc+sample.replace('broken', 'broken.broken.kraken.txt')
+  # with open(new_fn, 'w') as f:
+  #   f.write('')
+  with open(new_fn_didnt_add, 'w') as f:
+    f.write('')
+  for line in open(sample_direc+sample, 'r'):
+    count += 1
+    #if count > 100: continue
+    new_line = line.split('\t')
+    if new_line[0] == 'C':
+      try:
+        classif = new_line[2]
+        classif_taxid = classif.split('(taxid ')[1].replace(')', '')
+        minimizers = new_line[4].replace('\n', '').split(' ')
+        taxids = [mini.split(':')[0] for mini in minimizers]
+        sums = {}
+        total = 0
+        for mini in minimizers:
+          if mini == '': continue
+          if mini.split(':')[0] in sums:
+            sums[mini.split(':')[0]] = sums[mini.split(':')[0]]+int(mini.split(':')[1])
+          else:
+            sums[mini.split(':')[0]] = int(mini.split(':')[1])
+          total += int(mini.split(':')[1])
+        strain = False
+        try:
+          if id_rank[classif_taxid] == 'strain':
+            strain = True
+        except: do_nothing = True
+        if classif_taxid not in sums: sums[classif_taxid] = 0
+        if not strain:
+          for tid in sums:
+            if tid == classif_taxid: continue
+            if tid == 'A': continue
+            this_sum = sums[tid]
+            for a in range(20):
+              try:
+                if parent_dict[tid] == classif_taxid:
+                  sums[classif_taxid] += this_sum
+                  break
+                else:
+                  tid = parent_dict[tid]
+              except: continue
+        conf = sums[classif_taxid]/total
+        new_line[2] = new_line[2]+':'+str(round(conf, 2))
+        this_new_line = ''
+        for a in range(len(new_line)):
+          if a != len(new_line)-1:
+            this_new_line += new_line[a]+'\t'
+          else: this_new_line += new_line[a]+'\n'
+        with open(new_fn, 'a') as f:
+          f.write(this_new_line)
+      except:
+        with open(new_fn_didnt_add, 'a') as f:
+          f.write(line)
+    else:
+      with open(new_fn, 'a') as f:
+        f.write(line)
+```
+Have an extra line break after each classified sequence, but this shouldn't matter for anything.
+
+## Prepare master input file
+
+This looks like this:
+```{bash, eval=FALSE}
+D1	/home/robyn/vinko/kraken2_outraw_conf/D1_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D1.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D1.fasta-s1.m8
+D2	/home/robyn/vinko/kraken2_outraw_conf/D2_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D2.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D2.fasta-s1.m8
+D3	/home/robyn/vinko/kraken2_outraw_conf/D3_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D3.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D3.fasta-s1.m8
+D4	/home/robyn/vinko/kraken2_outraw_conf/D4_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D4.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D4.fasta-s1.m8
+D5	/home/robyn/vinko/kraken2_outraw_conf/D5_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D5.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D5.fasta-s1.m8
+D6	/home/robyn/vinko/kraken2_outraw_conf/D6_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D6.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D6.fasta-s1.m8
+D7	/home/robyn/vinko/kraken2_outraw_conf/D7_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D7.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D7.fasta-s1.m8
+D8	/home/robyn/vinko/kraken2_outraw_conf/D8_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D8.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D8.fasta-s1.m8
+D9	/home/robyn/vinko/kraken2_outraw_conf/D9_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D9.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D9.fasta-s1.m8
+D10	/home/robyn/vinko/kraken2_outraw_conf/D10_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D10.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D10.fasta-s1.m8
+D11	/home/robyn/vinko/kraken2_outraw_conf/D11_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D11.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D11.fasta-s1.m8
+D12	/home/robyn/vinko/kraken2_outraw_conf/D12_refseq_0.0.conf.kraken.txt	kraken2	mmseqs_U90_out_tophit/mmseqs-D12.fasta-s1.m8-parsed.txt	uniref	/home/storage/robyn/vinko/mmseqs_m8/mmseqs-D12.fasta-s1.m8
+```
+And gets called `multi-sample-outfiles-w-m8.txt`
+
+# UniProt mapping
+
+Get list of UniProt ID's:
+```{bash, eval=FALSE}
+wget https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/idmapping_selected.tab.gz
+gunzip idmapping_selected.tab.gz
+```
+
+Loop through and get orthologs where possible:
+```{python, eval=FALSE}
+from datetime import datetime
+import os
+
+startTime = datetime.now()
+map_dict = {}
+orgs = set([])
+gene_id_to_ko = {}
+
+with open('uniprot_ko_mapping.txt', 'w') as f:
+  f.write('')
+
+count = 0
+for line in open('idmapping_selected.tab', 'r'):
+  count += 1
+  print(count)
+  # if count <1000: continue
+  # elif count > 1100: break
+  line = line.split('\t')
+  up_id = line[0]
+  
+  os.system('wget http://rest.kegg.jp/conv/genes/uniprot:'+up_id+' -O download.txt -q')
+  if os.path.exists('download.txt') and os.stat('download.txt').st_size != 0:
+    f = open('download.txt', 'r').read()
+    if len(f) < 2: continue
+    gn = f.split('\t')[1].replace('\n', '')
+    org_code = gn.split(':')[0]
+    if org_code not in orgs:
+      orgs.add(org_code)
+      os.system('wget http://rest.kegg.jp/link/ko/'+org_code+'/ -O download.txt -q')
+      if os.path.exists('download.txt') and os.stat('download.txt').st_size != 0:
+        for row in open('download.txt', 'r'):
+          row = row.split('\t')
+          gene_id_to_ko[row[0]] = row[1].replace('\n', '').replace('ko:', '')
+          if row[0] == gn:
+            map_dict[up_id] = row[1].replace('\n', '').replace('ko:', '')
+    elif gn in gene_id_to_ko:
+      map_dict[up_id] = gene_id_to_ko[gn]
+  if up_id in map_dict:
+    with open('uniprot_ko_mapping.txt', 'a') as f:
+      f.write(up_id+'\t'+map_dict[up_id]+'\n')
+
+print('\n\nTime taken:', datetime.now() - startTime)
+```
+
+### Using list of KEGG organisms
+
+Get list:
+```{bash, eval=FALSE}
+# https://www.genome.jp/brite/br08601
+wget https://www.genome.jp/kegg-bin/download_htext?htext=br08601&format=htext&filedir=
+```
+This is really not cooperating, but just clicking the link saves it and then this can be copied to the server.
+This is now saved as `br08601.keg`
+
+```{python, eval=FALSE}
+import os
+
+with open('no_gene_list.txt', 'w') as f:
+  f.write('')
+
+count = 0
+for line in open('br08601.keg', 'r'):
+  count += 1
+  line = line.split(' ')
+  for a in range(len(line)):
+    if a > 0 and line[a] != '':
+      org_code = line[a]
+      break
+  try:
+    os.system('wget http://rest.kegg.jp/link/ko/'+org_code+'/ -O organisms/'+org_code+'.txt -q')
+  except:
+    with open('no_gene_list.txt', 'a') as f:
+      f.write(org_code+'\n')
+```
+
+Remove the empty files:
+```{bash, eval=FALSE}
+find organisms/ -size  0 -print -delete
+```
+
+Get the full uniprot mapping:
+```{bash, eval=FALSE}
+wget https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/idmapping/idmapping.dat.gz
+```
+
+Now make a dictionary of all gene names and KEGG orthologs:
+```{python, eval=FALSE}
+import pickle
+import os
+
+dict_kegg = {}
+files = os.listdir('organisms/')
+for f in files:
+  for row in open('organisms/'+f, 'r'):
+    row = row.split('\t')
+    dict_kegg[row[0]] = row[1].replace('\n', '').replace('ko:', '')
+
+count = 0
+for gn in dict_kegg:
+  count += 1
+  if count < 100:
+    print(gn, dict_kegg[gn])
+
+with open('gene_to_ko.dict', 'wb') as f:
+    pickle.dump(dict_kegg, f)
+```
+
+Go through the uniprot mapping, linking the uniprot protein names with the kegg ortholog via the gene name:
+```{python, eval=FALSE}
+import os
+import pickle
+from datetime import datetime
+
+startTime = datetime.now()
+
+with open('uniprot_to_ko.txt', 'w') as f:
+  f.write('')
+
+with open('gene_to_ko.dict', 'r') as f:
+    dict_kegg = pickle.load(f)
+
+count = 0
+for row in open('idmapping.dat','r'):
+  count += 1
+  # if count > 10000: break
+  row = row.replace('\n', '').split('\t')
+  if row[1] == 'KEGG':
+    if row[2] in dict_kegg:
+      with open('uniprot_to_ko.txt', 'a') as f:
+        f.write(row[0]+'\t'+row[2]+'\t'+dict_kegg[row[2]]+'\n')
+
+print('\n\nTime taken:', datetime.now() - startTime)
+```
+
+Remove empty lines:
+```{bash, eval=FALSE}
+for i in *conf* ; do sed '/^[[:space:]]*$/d' $i > $i ; done
+```
+
+### Generate final normalised tables
+
+This will generate both stratified and unstratified files
+```{bash, eval=FALSE}
+python /home/dhwani/MyGit/MH2_test/parse_TaxonomyFunction.py --multisample multi-sample-outfiles-w-m8.txt --outputf SOWE_mmseqs_kraken-unstrat-matrix-RPKM.txt --unstratified Y
+#Stopped this because it is using a lot of memory - will make separately for each sample and then combine
+
+#python /home/dhwani/MyGit/MH2_test/parse_TaxonomyFunction.py --taxafile /home/storage/robyn/vinko/kraken2_outraw_V205_all_conf/D1_refseq_0.0.kraken.txt --taxafiletype kraken2 --funcfile mmseqs_U90_out_tophit/mmseqs-D1.fasta-s1.m8-parsed.txt --funcfiletype uniref --m8file /home/storage/robyn/vinko/mmseqs_m8/mmseqs-D1.fasta-s1.m8 --outputf SOWE_D1_mmseqs_kraken-strat-matrix-RPKM.txt --stratified Y
+#had some issues with needing to add more to an if/else statement so just decided to use the multisample option but with single samples
+
+parallel -j 1 'python /home/dhwani/MyGit/MH2_test/parse_TaxonomyFunction.py --multisample multi-sample-outfiles-w-m8-{}.txt --outputf SOWE_mmseqs_kraken-strat-matrix-RPKM-EC-{}.txt --stratified Y --map2EC Y' ::: D1 D2 D3 D4 D5 D6 D7 D8 D9 D10 D11 D12
+
+parallel -j 1 'python /home/dhwani/MyGit/MH2_test/parse_TaxonomyFunction.py --multisample multi-sample-outfiles-w-m8-{}.txt --outputf SOWE_mmseqs_kraken-strat-matrix-RPKM-UniProt-{}.txt --stratified Y' ::: D1 D2 D3 D4 D5 D6 D7 D8 D9 D10 D11 D12
+
+# python /home/dhwani/MyGit/MH2_test/parse_TaxonomyFunction.py --multisample multi-sample-outfiles-w-m8.txt --outputf SOWE_mmseqs_kraken-strat-matrix-RPKM.txt --stratified Y
+
+# python /home/dhwani/MyGit/MH2_test/parse_TaxonomyFunction.py --multisample multi-sample-outfiles-w-m8.txt --outputf SOWE_mmseqs_kraken-strat-matrix-RPKM.txt --unstratified Y --map2EC Y
+
+# python /home/dhwani/MyGit/MH2_test/parse_TaxonomyFunction.py --multisample multi-sample-outfiles-w-m8.txt --outputf SOWE_mmseqs_kraken-strat-matrix-RPKM.txt --stratified Y --map2EC Y
+```
+
+Combine outputs:
+```{python, eval=FALSE}
+import pandas as pd
+import os
+
+samples = ['D'+str(a) for a in range(1,13)]
+
+for sample in samples:
+  f = 'SOWE_mmseqs_kraken-strat-matrix-RPKM-EC-'+sample+'.txt'
+  df = pd.read_csv(f, index_col=0, header=0, sep='\t')
+  if sample == 'D1':
+    combined_df = pd.DataFrame(df)
+  else:
+    combined_df = pd.concat([combined_df, df]).fillna(value=0)
+    combined_df = combined_df.groupby(by=combined_df.index, axis=0).sum()
+
+combined_df.to_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-EC.txt', sep='\t')
+combined_df = combined_df.reset_index()
+combined_df[['EC','Taxonomy']] = combined_df.function.str.split("|",expand=True,)
+combined_df = combined_df.set_index('function')
+combined_df.to_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-EC-split.txt', sep='\t')
+combined_df = combined_df.reset_index()
+combined_df = combined_df.set_index('EC').drop(['function', 'Taxonomy'], axis=1)
+combined_df = combined_df.groupby(by=combined_df.index, axis=0).sum()
+combined_df.to_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-EC-no-tax.txt', sep='\t')
+```
+
+```{python, eval=FALSE}
+import pandas as pd
+import os
+from operator import add
+
+samples = ['D'+str(a) for a in range(1,13)]
+up_id = {}
+
+for sample in samples:
+  f = 'SOWE_mmseqs_kraken-strat-matrix-RPKM-UniProt-'+sample+'.txt'
+  for row in open(f, 'r'):
+    row = row.replace('\n', '').split('\t')
+    if row[0] != 'function':
+      if row[0] in up_id:
+        up_id[row[0]] = up_id[row[0]]+[[sample, row[1]]]
+      else:
+        up_id[row[0]] = [[sample, row[1]]]
+
+with open('SOWE_mmseqs_kraken-strat-matrix-RPKM-UniProt.txt', 'w') as f:
+  f.write('function\tD1\tD2\tD3\tD4\tD5\tD6\tD7\tD8\tD9\tD10\tD11\tD12\n')
+
+for up in up_id:
+  this_row = {'D1':0, 'D2':0, 'D3':0, 'D4':0, 'D5':0, 'D6':0, 'D7':0, 'D8':0, 'D9':0, 'D10':0, 'D11':0, 'D12':0}
+  for sample in up_id[up]:
+    this_row[sample[0]] = this_row[sample[0]]+float(sample[1])
+  this_row_list = up+'\t'
+  for sample in samples:
+    if sample != 'D12':
+      this_row_list += str(this_row[sample])+'\t'
+    else:
+      this_row_list += str(this_row[sample])+'\n'
+  with open('SOWE_mmseqs_kraken-strat-matrix-RPKM-UniProt.txt', 'a') as f:
+    w = f.write(this_row_list)
+
+combined_df = pd.read_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-UniProt.txt', index_col=0, header=0, sep='\t')
+combined_df = combined_df.reset_index()
+combined_df[['UniProt','Taxonomy']] = combined_df.function.str.split("|",expand=True,)
+combined_df = combined_df.set_index('function')
+combined_df.to_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-UniProt-split.txt', sep='\t')
+combined_df.reset_index().set_index('UniProt').drop(['function', 'Taxonomy', 'KO', 'KO Taxonomy'], axis=1).combined_df.groupby(['UniProt']).sum().to_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-UniProt-no-tax.txt', sep='\t')
+
+combined_df = pd.read_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-UniProt.txt', index_col=0, header=0, sep='\t')
+  
+uniprot_to_ko = {}
+for row in open('uniprot_mapping/uniprot_to_ko.txt', 'r'):
+  row = row.replace('\n', '').split('\t')
+  uniprot_to_ko[row[0]] = row[2]
+
+with open('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG.txt', 'w') as f:
+  f.write("\t".join(['function', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11',
+       'D12', 'KO', 'KO Taxonomy'])+'\n')
+
+# ko_dict = {}
+# count = 0
+# for row in combined_df.index.values:
+#   count += 1
+#   if count > 100: break
+#   up = row.split('|')[0].split('_')[1]
+#   try:
+#     ko = uniprot_to_ko[up]
+#     ko_tax = [ko, ko+'|'+row.split('|')[1]]
+#   except:
+#     ko_tax = ['Unclassified', 'Unclassified|'+row.split('|')[1]]
+#   this_row = list(combined_df.loc[row, :])+ko_tax
+#   with open('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG.txt', 'a') as f:
+#     w = f.write(row+'\t'+"\t".join(map(str, this_row))+'\n')
+#     
+#   if ko_tax[1] not in ko_dict:
+#     ko_tax[1] = list(map(add, KO_dict[ko_tax[1]], list(combined_df.loc[row, :])))
+#   else:
+#     ko_tax[1] = list(combined_df.loc[row, :])
+#   if count % 1000000 == 0: print(count)
+
+ko_dict = {}
+count = 0
+for row_orig in open('SOWE_mmseqs_kraken-strat-matrix-RPKM-UniProt.txt', 'r'):
+  row = row_orig.replace('\n', '').split('\t')
+  if row[0] == 'function': continue
+  count += 1
+  #if count > 100: break
+  up = row[0].split('|')[0].split('_')[1]
+  try:
+    ko = uniprot_to_ko[up]
+    ko_tax = [ko, ko+'|'+row[0].split('|')[1]]
+  except:
+    ko_tax = ['Unclassified', 'Unclassified|'+row[0].split('|')[1]]
+  this_row = row+ko_tax
+  with open('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG.txt', 'a') as f:
+    w = f.write("\t".join(map(str, this_row))+'\n')
+  
+  #print(row, ko_tax)
+  if ko_tax[1] in ko_dict:
+    ko_dict[ko_tax[1]] = list(map(add, ko_dict[ko_tax[1]], [float(i) for i in row[1:]]))
+  else:
+    ko_dict[ko_tax[1]] = [float(i) for i in row[1:]]
+  if count % 1000000 == 0: print(count)
+  
+combined_df_KO = pd.DataFrame.from_dict(ko_dict, orient='index', columns=['D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12'])
+combined_df_KO = combined_df_KO.reset_index()
+combined_df_KO = combined_df_KO.rename(columns={'index':'KO_Taxonomy'}).set_index('KO_Taxonomy')
+combined_df_KO.to_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG-grouped.txt', sep='\t')
+
+with open('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG-split.txt', 'w') as f:
+  f.write("\t".join(['KO_Taxonomy', 'D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11',
+       'D12', 'KO', 'Taxonomy'])+'\n')
+
+count = 0   
+for row_orig in open('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG-grouped.txt', 'r'):
+  count += 1
+  row = row_orig.replace('\n', '').split('\t')
+  if row[0] == 'KO_Taxonomy': continue
+  ko_tax = row[0].split('|')
+  this_row = row+ko_tax
+  with open('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG-split.txt', 'a') as f:
+    b = f.write("\t".join(map(str, this_row))+'\n')
+  if count % 100000 == 0: print(count)
+  
+combined_df_KO = pd.read_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG-split.txt', header=0, sep='\t')
+combined_df_KO = combined_df_KO.set_index('KO').drop(['Taxonomy', 'KO_Taxonomy'], axis=1)
+combined_df_KO = combined_df_KO.groupby(by=combined_df_KO.index, axis=0).sum()
+combined_df_KO.to_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG-no-tax.txt', sep='\t')
+
+
+# KO_dict = {}
+# count = 0
+# for row in open('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG.txt', 'r'):
+#   count += 1
+#   row = row.split('\t')
+#   print(row)
+#   if row[14] in KO_dict:
+#     KO_dict[row[14]] = list(map(add, KO_dict[row[14]], row[1:13]))
+#   else:
+#     KO_dict[row[14]] = row[1:13]
+#   print(row[14], row[1:13])
+#   if count > 100: break
+
+# combined_df_KO = pd.read_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG.txt', header=0, sep='\t').set_index('KO Taxonomy').drop(['KO', 'function'], axis=1)
+# print(combined_df_KO[:10])
+# combined_df_KO = combined_df_KO.groupby(by=combined_df_KO.index, axis=0).sum()
+# combined_df_KO = combined_df.reset_index().set_index('KO Taxonomy').drop(['UniProt','Taxonomy', 'KO', 'function']).groupby(by=['KO Taxonomy'], axis=0).sum()
+# combined_df_KO.to_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG-grouped.txt', sep='\t')
+# combined_df_KO[['KO','Taxonomy']] = combined_df.KO Taxonomy.str.split("|",expand=True,)
+# combined_df_KO.to_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG-split.txt', sep='\t')
+# combined_df_KO.reset_index().set_index('KO').drop(['Taxonomy', 'KO Taxonomy'])
+# combined_df_KO = combined_df_KO.groupby(by=combined_df_KO.index, axis=0).sum()
+# combined_df_KO.to_csv('SOWE_mmseqs_kraken-strat-matrix-RPKM-KEGG-no-tax.txt', sep='\t')
+```
+
+
+
+# alkB HMM
+
+```{bash, eval=FALSE}
+#first align sequence file using https://www.ebi.ac.uk/Tools/msa/clustalo/ (choose stockholm alignment)
+hmmbuild alkB_hmm.hmm alkB_alignment.txt
+hmmbuild alkB_hmm_nucleotide.hmm alkB_alignment_nucleotide.txt
+
+parallel -j 12 "sed -n '1~4s/^@/>/p;2~4p' {} > joined_reads_fasta/{/.}.fasta" ::: joined_reads/*
+parallel -j 1 ' hmmsearch alkB_hmm.hmm {} > {/.}_hmm.out' ::: joined_reads_fasta/*
+
+parallel -j 12 'hmmsearch alkB_hmm_nucleotide.hmm {} > hmm_alkB/{/.}.out' ::: MAGs/*
+```
+
+# CARD RGI
+
+Install:
+```{bash, eval=FALSE}
+conda create --name rgi
+conda install --channel bioconda rgi=5.2.0
+wget https://card.mcmaster.ca/latest/data
+tar -xvf data ./card.json
+rgi load --card_json card.json --local
+#Additional preprocessing for metagenomics
+rgi card_annotation -i card.json > card_annotation.log 2>&1
+rgi load -i card.json --card_annotation card_database_v3.1.3.fasta --local
+
+#wildcard
+wget -O wildcard_data.tar.bz2 https://card.mcmaster.ca/latest/variants
+mkdir -p wildcard
+tar -xjf wildcard_data.tar.bz2 -C wildcard
+gunzip wildcard/*.gz
+rgi wildcard_annotation -i wildcard --card_json card.json -v version_number > wildcard_annotation.log 2>&1
+rgi load --wildcard_annotation wildcard_database_v3.1.3.fasta \
+  --wildcard_index wildcard/index-for-model-sequences.txt \
+  --card_annotation card_database_v3.1.3.fasta --local
+  
+#load k-mer reference data
+rgi load --kmer_database wildcard/61_kmer_db.json \
+  --amr_kmers wildcard/all_amr_61mers.txt --kmer_size 61 \
+  --local --debug > kmer_load.61.log 2>&1
+```
+
+Run megahit contigs:
+```{bash, eval=FALSE}
+rgi main -i /home/robyn/vinko/anvio/megahit_out/final.contigs.fa -o megahit_contigs_card.fasta -t contig \
+                -a DIAMOND -n 12 --include_loose --local --clean
+```
+
+Run with samples:
+```{bash, eval=FALSE}
+rgi bwt --read_one /home/robyn/vinko/trimmed_reads/D1_R1.fq.gz --read_two /home/robyn/vinko/trimmed_reads/D1_R2.fq.gz --aligner bowtie2 --output_file D1_CARD --threads 12 --local --clean
+
+parallel -j 1 --link 'rgi bwt --read_one {1} --read_two {2} --aligner bowtie2 --output_file {1/.}_CARD --threads 12 --local --clean' \
+ ::: /home/robyn/vinko/trimmed_reads/*_R1.fq.gz ::: /home/robyn/vinko/trimmed_reads/*_R2.fq.gz
+```

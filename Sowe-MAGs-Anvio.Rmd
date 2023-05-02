@@ -1,0 +1,652 @@
+---
+title: Sowe MAGs Anvi'o
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+fig_width: 10
+fig_height: 10
+---
+
+Note that the first part of this was carried out using Anvi'o 6.2 and then this was upgraded partway through.
+
+# Set up environment
+
+```{bash, eval=FALSE}
+conda activate anvio-6.2
+```
+
+# Assemble contigs from reads
+
+This step used megahit to co-assemble contigs from all samples, keeping only contigs with a length of at least 1000 bp.
+
+```{bash, eval=FALSE}
+R1=$( ls trimmed_reads/*_R1.fq.gz | tr '\n' ',' | sed 's/,$//' )
+R2=$( ls trimmed_reads/*_R2.fq.gz | tr '\n' ',' | sed 's/,$//' )
+    
+ megahit -1 $R1 \
+         -2 $R2 \
+         --min-contig-len 1000 \
+         --num-cpu-threads 12 \
+         --presets meta-large \
+         --memory 0.3 \
+         -o anvio/megahit_out \
+        --verbose
+
+# Remove intermediate contigs to save space
+rm -r megahit_out_by_set/*/intermediate_contigs
+```
+
+# Reformat fasta for Anvi'o
+
+```{bash, eval=FALSE}
+anvi-script-reformat-fasta megahit_out/final.contigs.fa \
+                               --simplify-names \
+                               --min-len 1000 \
+                               -o megahit_out/final.contigs.fixed.fa
+```
+
+# Make Anvi'o database
+
+```{bash, eval=FALSE}
+mkdir anvio_databases
+
+anvi-gen-contigs-database -f megahit_out/final.contigs.fixed.fa \
+                              -o anvio_databases/CONTIGS.db \
+                              -n sowe
+```
+
+# Run HMMs to identify genes
+
+```{bash, eval=FALSE}
+anvi-run-hmms -c anvio_databases/CONTIGS.db --num-threads 12
+anvi-get-sequences-for-gene-calls -c anvio_databases/CONTIGS.db -o anvio_databases/gene_calls.fa
+```
+
+# Classify contigs using Kaiju
+
+```{bash, eval=FALSE}
+# install kaiju
+# conda install -c bioconda kaiju
+        
+kaiju -t /scratch/db/kaiju_db_nr_euk/nodes.dmp \
+      -f /scratch/db/kaiju_db_nr_euk/kaiju_db_nr_euk.fmi \
+      -i anvio_databases/gene_calls.fa \
+      -o anvio_databases/gene_calls.nr.out \
+      -z 10 \
+      -v
+    
+kaiju-addTaxonNames -t /scratch/db/kaiju_db_nr_euk/nodes.dmp \
+              -n /scratch/db/kaiju_db_nr_euk/names.dmp \
+              -i anvio_databases/gene_calls.nr.out \
+              -o anvio_databases/gene_calls.nr.names \
+              -r superkingdom,phylum,class,order,family,genus,species
+
+anvi-import-taxonomy-for-genes -i anvio_databases/gene_calls.nr.names \
+                               -c anvio_databases/CONTIGS.db \
+                               -p kaiju \
+                               --just-do-it
+```
+
+# Get the abundance of contigs in each sample 
+
+(by mapping with Bowtie2 back to the reads)
+
+Make the bowtie2 database of the contigs:
+```{bash, eval=FALSE}
+bowtie2-build megahit_out/final.contigs.fixed.fa megahit_out/final.contigs.fixed
+mkdir bam_files
+```
+
+Make the sample_ids.txt file (in Python):
+```{python, eval=FALSE}
+import os
+
+files = ['D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8', 'D9', 'D10', 'D11', 'D12']
+with open('sample_ids.txt', 'w') as f:
+  for sample in files:
+    f.write(sample+'\n')
+```
+
+Map the contigs to the reads:
+```{bash, eval=FALSE}
+for SAMPLE in `awk '{print $1}' sample_ids.txt`
+do
+
+    # do the bowtie mapping to get the SAM file:
+    bowtie2 --threads 12 \
+            -x anvio/megahit_out/final.contigs.fixed \
+            -1 "trimmed_reads/"$SAMPLE"_R1.fq.gz" \
+            -2 "trimmed_reads/"$SAMPLE"_R2.fq.gz" \
+            --no-unal \
+            -S anvio/bam_files/$SAMPLE.sam
+
+    # covert the resulting SAM file to a BAM file:
+    samtools view -F 4 -bS anvio/bam_files/$SAMPLE.sam > anvio/bam_files/$SAMPLE-RAW.bam
+
+    # sort and index the BAM file:
+    samtools sort anvio/bam_files/$SAMPLE-RAW.bam -o anvio/bam_files/$SAMPLE.bam
+    samtools index anvio/bam_files/$SAMPLE.bam
+
+    # remove temporary files:
+    rm anvio/bam_files/$SAMPLE.sam anvio/bam_files/$SAMPLE-RAW.bam
+
+done
+```
+
+# Make the Anvi'o profile databases that contain coverage and detection statistics
+
+```{bash, eval=FALSE}
+mkdir anvio_databases/profiles
+
+for SAMPLE in `awk '{print $1}' sample_ids.txt`
+do
+
+    anvi-profile -c anvio_databases/CONTIGS.db \
+                 -i bam_files/$SAMPLE.bam \
+                 --num-threads 12 \
+                 -o anvio_databases/profiles/$SAMPLE
+done
+```
+
+# Merge the sample profiles
+
+```{bash, eval=FALSE}
+anvi-merge -c anvio_databases/CONTIGS.db \
+           -o anvio_databases/merged_profiles \
+           anvio_databases/profiles/D*/PROFILE.db
+```
+
+# Upgrade to Anvi'o 7
+
+```{bash, eval=FALSE}
+anvi-migrate --migrate-dbs-safely anvio_databases/CONTIGS.db anvio_databases/merged_profiles/PROFILE.db
+```
+
+# Analyses with contigs >5000 bp {.tabset}
+
+Note that these analyses with contigs >5000 bp were not used for the final MAGs, although some of the annotations with KEGG and with the SCG taxonomy were applied to all contigs so these were what was used for the final >2500 bp MAGs.
+
+## Cluster contigs 5000 bp minimum
+
+```{bash, eval=FALSE}
+anvi-cluster-contigs -c anvio_databases/CONTIGS.db \
+                         -p anvio_databases/merged_profiles/PROFILE.db \
+                         --collection-name "merged_concoct_5000" \
+                         --driver concoct \
+                         --length-threshold 5000 \
+                         --num-threads 12 \
+                         --just-do-it
+```
+
+This initially gave 155 bins, 72 of which were >50% completion, which we needed to summarise and then manually refine.
+
+## Summarise
+
+```{bash, eval=FALSE}
+mkdir concoct_summary_5000
+anvi-summarize -c anvio_databases/CONTIGS.db \
+                   -p anvio_databases/merged_profiles/PROFILE.db \
+                   -C "merged_concoct_5000" \
+                   -o concoct_summary_5000/summary
+```
+
+## Estimate completeness
+
+```{bash, eval=FALSE}
+anvi-estimate-genome-completeness -c anvio_databases/CONTIGS.db \
+                                  -p anvio_databases/merged_profiles/PROFILE.db \
+                                  -C "merged_concoct_5000"
+```
+
+## Interactive refinement
+
+```{bash, eval=FALSE}
+anvi-refine -c anvio_databases/CONTIGS.db \
+            -p anvio_databases/merged_profiles/PROFILE.db \
+            -C "merged_concoct_5000" \
+            -b Bin_131_3 --server-only -P 8082
+            
+#in second window
+ssh -L 8082:localhost:8082 vinko@kronos.pharmacology.dal.ca
+#go to http://localhost:8082/ in browser
+```
+
+These steps were repeated for all bins, somtimes multiple times, to get redundancy <10% for each bin. After this we had 91 bins that were >50% completion.
+
+## Rename bins
+
+```{bash, eval=FALSE}
+anvi-rename-bins -c anvio_databases/CONTIGS.db \
+                     -p anvio_databases/merged_profiles/PROFILE.db \
+                     --collection-to-read merged_concoct_5000 \
+                     --collection-to-write FINAL \
+                     --size-for-MAG 1 \
+                     --min-completion-for-MAG 50 \
+                     --max-redundancy-for-MAG 10 \
+                     --prefix SOWE \
+                     --report-file renaming_bins.txt
+```
+
+## Make new collection with these
+
+This should have also removed bins that were <50% completion or >10% redundancy, but for some reason these weren't removed, so we made a new collection with these removed:
+```{bash, eval=FALSE}
+anvi-rename-bins -c anvio_databases/CONTIGS.db \
+                     -p anvio_databases/merged_profiles/PROFILE.db \
+                     --collection-to-read merged_concoct_5000 \
+                     --collection-to-write FINAL \
+                     --size-for-MAG 1 \
+                     --min-completion-for-MAG 50 \
+                     --max-redundancy-for-MAG 10 \
+                     --prefix SOWE \
+                     --report-file renaming_bins.txt
+
+anvi-summarize -c anvio_databases/CONTIGS.db \
+                   -p anvio_databases/merged_profiles/PROFILE.db \
+                   -C "FINAL" \
+                   -o SUMMARY/summary
+
+anvi-export-collection -C FINAL \
+                       -p anvio_databases/merged_profiles/PROFILE.db
+```
+
+Make new collection using Python:
+```{python, eval=FALSE}
+import pandas as pd
+rename = pd.read_csv('renaming_bins.txt', header=0, sep='\t')
+rename = rename.loc[rename['completion'] >= 50]
+rename = rename.loc[rename['redundancy'] <= 10]
+rename = rename.loc[rename['size_in_Mbp'] >= 1]
+rename = rename.set_index('new_bin_name')
+bins_keeping = list(rename.index.values)
+
+final = pd.read_csv('collection-FINAL.txt', sep='\t', header=None)
+keeping = []
+for row in final.index.values:
+  if final.loc[row, 1] in bins_keeping:
+    keeping.append(row)
+
+filtered = final.loc[keeping, :]
+filtered.to_csv('collection-FINAL-filtered.txt', header=False, index=False, sep='\t')
+quit()
+```
+
+Import the reduced collection:
+```{bash, eval=FALSE}
+anvi-import-collection -C FINALfiltered \
+                        -p anvio_databases/merged_profiles/PROFILE.db \
+                        -c anvio_databases/CONTIGS.db \
+                        collection-FINAL-filtered.txt
+```
+
+## Get taxonomy for all SCG
+
+Then we got the taxonomy of all single copy genes within each bin, following the instructions [here](https://merenlab.org/2019/10/08/anvio-scg-taxonomy/):
+```{bash, eval=FALSE}
+anvi-get-sequences-for-hmm-hits -c anvio_databases/CONTIGS.db \
+                                -p anvio_databases/merged_profiles/PROFILE.db \
+                                -C "FINALfiltered" \
+                                 -o hmm_hits/"concat-proteins.fa" \
+                                --hmm-source 'Bacteria_71' \
+                                --return-best-hit \
+                                --get-aa-sequences \
+                                --concatenate
+                                
+anvi-setup-scg-taxonomy
+
+anvi-run-scg-taxonomy -c anvio_databases/CONTIGS.db \
+                      -T 12
+                      
+anvi-estimate-scg-taxonomy -c anvio_databases/CONTIGS.db \
+                           -p anvio_databases/merged_profiles/PROFILE.db \
+                           --update-profile-db-with-taxonomy \
+                           --compute-scg-coverages \
+                           --metagenome-mode
+                           
+anvi-summarize -c anvio_databases/CONTIGS.db \
+                   -p anvio_databases/merged_profiles/PROFILE.db \
+                   -C "FINALfiltered" \
+                   -o FINAL/summary
+```
+
+Now get taxonomy with CheckM:
+```{bash, eval=FALSE}
+mkdir MAGs
+
+for i in FINAL/summary/bin_by_bin/* ; 
+do 
+    MAG="$(basename -- $i)"
+    anvi-script-reformat-fasta FINAL/summary/bin_by_bin/$MAG/$MAG-contigs.fa \
+                                   --simplify-names \
+                                   --prefix $MAG \
+                                   -o MAGs/$MAG.fa
+done
+
+checkm tree MAGs -x .fa -t 20 `pwd`/MAGs-CHECKM-TREE
+checkm tree_qa `pwd`/MAGs-CHECKM-TREE -f MAGs-CHECKM.txt
+```
+
+Reformat CheckM taxonomy:
+```{python, eval=FALSE}
+import pandas as pd
+
+mags = pd.read_csv('MAGs-CHECKM.txt', header=None)
+file = list(mags.loc[:, 0])
+new_file = []
+for row in file:
+  row = row.split(' ')
+  new_row = [r for r in row if r != '']
+  new_file.append(new_row)
+
+new_file = new_file[3:-1]
+new_file_df = pd.DataFrame(new_file, columns=['Bin Id', '# unique markers (of 43)', '# multi-copy', 'Taxonomy'])
+new_file_df.to_csv('MAGs-CHECKM-reformat.txt', index=False, sep='\t')
+```
+
+## Annotate with KEGG
+
+Following the instructions [here](https://merenlab.org/software/anvio/help/7/programs/anvi-setup-kegg-kofams/) and [here](https://merenlab.org/software/anvio/help/7/programs/anvi-run-kegg-kofams/).
+
+```{bash, eval=FALSE}
+anvi-setup-kegg-kofams
+
+anvi-run-kegg-kofams  -c anvio_databases/CONTIGS.db  \
+                      -p anvio_databases/merged_profiles/PROFILE.db \
+                      -C "FINALfiltered" \
+                      -T 20
+```
+
+## .
+
+At this point we realised that we didn't have any Pseudomonas, that we were particularly interested in because these were so abundant in the weathered LDPE samples according to the Kraken2 output. So we decided to go back and refine the bins that were created using all contigs >2500 bp.
+
+# Analyses with contigs >2500 bp
+
+## Cluster contigs
+
+```{bash, eval=FALSE}
+anvi-cluster-contigs -c anvio_databases/CONTIGS.db \
+                         -p anvio_databases/merged_profiles/PROFILE.db \
+                         --collection-name "merged_concoct_2500" \
+                         --driver concoct \
+                         --length-threshold 2500 \
+                         --num-threads 12 \
+                         --just-do-it
+```
+
+This gave 279 bins, 155 of which had completion >50%.
+
+## Summarise
+
+```{bash, eval=FALSE}
+anvi-summarize -c anvio_databases/CONTIGS.db \
+                   -p anvio_databases/merged_profiles/PROFILE.db \
+                   -C "merged_concoct_2500" \
+                   -o concoct_summary_2500/summary
+```
+
+## Manually refine
+
+```{bash, eval=FALSE}
+anvi-refine -c anvio_databases/CONTIGS.db \
+            -p anvio_databases/merged_profiles/PROFILE.db \
+            -C "merged_concoct_2500" \
+            -b Bin_65 --server-only -P 8082
+
+#In separate window       
+ssh -L 8082:localhost:8082 vinko@kronos.pharmacology.dal.ca
+
+#go to http://localhost:8082/ in browser
+```
+
+These steps were repeated multiple times to get redundancy <10% in all bins >50% completion. This gave a final 215 bins.
+
+## Rename bins
+
+```{bash, eval=FALSE}
+anvi-rename-bins -c anvio_databases/CONTIGS.db \
+                     -p anvio_databases/merged_profiles/PROFILE.db \
+                     --collection-to-read merged_concoct_2500 \
+                     --collection-to-write FINAL_2500 \
+                     --size-for-MAG 1 \
+                     --min-completion-for-MAG 50 \
+                     --max-redundancy-for-MAG 10 \
+                     --prefix SOWE_2500 \
+                     --report-file renaming_bins.txt
+
+anvi-export-collection -C FINAL_2500 \
+                       -p anvio_databases/merged_profiles/PROFILE.db
+```
+
+## Reduce collection
+
+```{python, eval=FALSE}
+import pandas as pd
+rename = pd.read_csv('renaming_bins.txt', header=0, sep='\t')
+rename = rename.loc[rename['completion'] >= 50]
+rename = rename.loc[rename['redundancy'] <= 10]
+rename = rename.loc[rename['size_in_Mbp'] >= 1]
+rename = rename.set_index('new_bin_name')
+bins_keeping = list(rename.index.values)
+
+final = pd.read_csv('collection-FINAL_2500.txt', sep='\t', header=None)
+keeping = []
+for row in final.index.values:
+  if final.loc[row, 1] in bins_keeping:
+    keeping.append(row)
+
+filtered = final.loc[keeping, :]
+filtered.to_csv('collection-FINAL_2500-filtered.txt', header=False, index=False, sep='\t')
+```
+
+## Import reduced collection
+
+```{bash, eval=FALSE}
+anvi-import-collection -C FINAL_2500_filtered \
+                        -p anvio_databases/merged_profiles/PROFILE.db \
+                        -c anvio_databases/CONTIGS.db \
+                        collection-FINAL_2500-filtered.txt
+                        
+anvi-summarize -c anvio_databases/CONTIGS.db \
+                   -p anvio_databases/merged_profiles/PROFILE.db \
+                   -C "FINAL_2500_filtered" \
+                   -o FINAL_2500_filtered/summary
+```
+
+## Get taxonomy
+
+```{bash, eval=FALSE}
+anvi-estimate-scg-taxonomy -c anvio_databases/CONTIGS.db \
+                          -p anvio_databases/merged_profiles/PROFILE.db \
+                          -C FINAL_2500_filtered \
+                          --compute-scg-coverages \
+                          -o FINAL_2500_filtered_scg-taxonomy.txt
+```
+
+## Rename using taxonomy
+
+```{bash, eval=FALSE}
+anvi-export-collection -p anvio_databases/merged_profiles/PROFILE.db \
+                          -C FINAL_2500_filtered \
+                          -O FINAL_2500_filtered_scg-export
+
+perl -e '$namesfile=shift; open(F,$namesfile); $count=1;while ($line = <F>){next if $line =~ /^bin_name/; chomp $line; @temp=split("\t",$line); $species_name=$temp[7]."_".$temp[9]."_".$count; $count++;$species_name=~s/\s+/_/g; $tax_id=$temp[0]; $hash{$tax_id}=$species_name;} $splitfile=shift; open(S,$splitfile); while ($s = <S>){chomp $s; @temp1=split("\t",$s); $t_id=$temp1[1]; $tax_name=$hash{$t_id}; print "$temp1[0]\t$tax_name\n";}' FINAL_2500_filtered_scg-taxonomy.txt FINAL_2500_filtered_scg-export.txt > FINAL_2500_filtered_scg-export-wtax.txt
+
+#Got an error after this:
+#This was the error:
+#Config Error: Sorry, bin name can't start with a digit. Long story. Please specify a name that
+#              starts with an ASCII letter.      
+#So this is because one of the family names starts with a number
+#Just rerunning the perl code with a prefix for the name
+perl -e '$namesfile=shift; open(F,$namesfile); $count=1;while ($line = <F>){next if $line =~ /^bin_name/; chomp $line; @temp=split("\t",$line); $species_name="SOWE_".$temp[7]."_".$temp[9]."_".$count; $count++;$species_name=~s/\s+/_/g; $tax_id=$temp[0]; $hash{$tax_id}=$species_name;} $splitfile=shift; open(S,$splitfile); while ($s = <S>){chomp $s; @temp1=split("\t",$s); $t_id=$temp1[1]; $tax_name=$hash{$t_id}; print "$temp1[0]\t$tax_name\n";}' FINAL_2500_filtered_scg-taxonomy.txt FINAL_2500_filtered_scg-export.txt > FINAL_2500_filtered_scg-export-wtax.txt
+
+anvi-import-collection FINAL_2500_filtered_scg-export-wtax.txt \
+                            -p anvio_databases/merged_profiles/PROFILE.db \
+                            -c anvio_databases/CONTIGS.db \
+                            -C FINAL_2500_filtered_wtax
+```
+
+## Interactive view of MAGs
+
+```{bash, eval=FALSE}
+anvi-interactive -p anvio_databases/merged_profiles/PROFILE.db \
+                  -c anvio_databases/CONTIGS.db \
+                  -C FINAL_2500_filtered_wtax \
+                  --server-only -P 8082
+
+anvi-summarize -c anvio_databases/CONTIGS.db \
+                   -p anvio_databases/merged_profiles/PROFILE.db \
+                   -C "FINAL_2500_filtered_wtax" \
+                   -o FINAL_2500_filtered_wtax/summary
+```
+
+## Get fasta file of each MAG
+
+```{bash, eval=FALSE}
+mkdir MAGs-2
+
+for i in FINAL_2500_filtered_wtax/summary/bin_by_bin/* ; 
+do 
+    MAG="$(basename -- $i)"
+    anvi-script-reformat-fasta FINAL_2500_filtered_wtax/summary/bin_by_bin/$MAG/$MAG-contigs.fa \
+                                   --simplify-names \
+                                   --prefix $MAG \
+                                   -o MAGs/$MAG.fa
+done
+```
+
+This didn't work for the MAGs that had a hyphen in the name, as it said that this wasn't an OK name. So redoing these in Python:
+```{python, eval=FALSE}
+import os
+MAGs = os.listdir('FINAL_2500_filtered_wtax/summary/bin_by_bin/')
+MAGs = [MAG for MAG in MAGs if '-' in MAG]
+for MAG in MAGs:
+  new_MAG = MAG.replace('-', '_')
+  os.system('anvi-script-reformat-fasta FINAL_2500_filtered_wtax/summary/bin_by_bin/'+MAG+'/'+MAG+'-contigs.fa --simplify-names --prefix '+new_MAG+' -o MAGs/'+new_MAG+'.fa')
+```
+
+## Get CheckM taxonomy
+
+```{bash, eval=FALSE}
+checkm tree MAGs -x .fa -t 20 `pwd`/MAGs-CHECKM-TREE
+checkm tree_qa `pwd`/MAGs-CHECKM-TREE -f MAGs-CHECKM.txt
+```
+
+## Put MAGs into tree
+
+Check which single copy genes we have in a good number of the MAGs (note we can choose multiple genes to use):
+```{bash, eval=FALSE}
+anvi-get-sequences-for-hmm-hits -c anvio_databases/CONTIGS.db \
+                                -p anvio_databases/merged_profiles/PROFILE.db \
+                                -C "FINAL_2500_filtered_wtax" \
+                                --hmm-source 'Bacteria_71' \
+                                --list-available-gene-names
+
+* Bacteria_71 [type: singlecopy]: ADK, AICARFT_IMPCHas, ATP-synt, ATP-synt_A,                                                                          
+Chorismate_synt, EF_TS, Exonuc_VII_L, GrpE, Ham1p_like, IPPT, OSCP, PGK,
+Pept_tRNA_hydro, RBFA, RNA_pol_L, RNA_pol_Rpb6, RRF, RecO_C, Ribonuclease_P,
+Ribosom_S12_S23, Ribosomal_L1, Ribosomal_L13, Ribosomal_L14, Ribosomal_L16,
+Ribosomal_L17, Ribosomal_L18p, Ribosomal_L19, Ribosomal_L2, Ribosomal_L20,
+Ribosomal_L21p, Ribosomal_L22, Ribosomal_L23, Ribosomal_L27, Ribosomal_L27A,
+Ribosomal_L28, Ribosomal_L29, Ribosomal_L3, Ribosomal_L32p, Ribosomal_L35p,
+Ribosomal_L4, Ribosomal_L5, Ribosomal_L6, Ribosomal_L9_C, Ribosomal_S10,
+Ribosomal_S11, Ribosomal_S13, Ribosomal_S15, Ribosomal_S16, Ribosomal_S17,
+Ribosomal_S19, Ribosomal_S2, Ribosomal_S20p, Ribosomal_S3_C, Ribosomal_S6,
+Ribosomal_S7, Ribosomal_S8, Ribosomal_S9, RsfS, RuvX, SecE, SecG, SecY, SmpB,
+TsaE, UPF0054, YajC, eIF-1a, ribosomal_L24, tRNA-synt_1d, tRNA_m1G_MT,
+Adenylsucc_synt
+```
+
+Get amino acid sequences for these genes (I'm just using the ones from the example for now, and will see how they do!):
+```{bash, eval=FALSE}
+anvi-get-sequences-for-hmm-hits -c anvio_databases/CONTIGS.db \
+                                -p anvio_databases/merged_profiles/PROFILE.db \
+                                -C "FINAL_2500_filtered_wtax" \
+                                -o concatenated-proteins_all_genes.fa \
+                                --hmm-source Bacteria_71 \
+                                --gene-names Chorismate_synt,EF_TS,Exonuc_VII_L,GrpE,Ham1p_like,IPPT,OSCP,PGK,Pept_tRNA_hydro,RBFA,RNA_pol_L,RNA_pol_Rpb6,RRF,RecO_C,Ribonuclease_P,Ribosom_S12_S23,Ribosomal_L1,Ribosomal_L13,Ribosomal_L14,Ribosomal_L16,Ribosomal_L17,Ribosomal_L18p,Ribosomal_L19,Ribosomal_L2,Ribosomal_L20,Ribosomal_L21p,Ribosomal_L22,Ribosomal_L23,Ribosomal_L27,Ribosomal_L27A,Ribosomal_L28,Ribosomal_L29,Ribosomal_L3,Ribosomal_L32p,Ribosomal_L35p,Ribosomal_L4,Ribosomal_L5,Ribosomal_L6,Ribosomal_L9_C,Ribosomal_S10,Ribosomal_S11,Ribosomal_S13,Ribosomal_S15,Ribosomal_S16,Ribosomal_S17,Ribosomal_S19,Ribosomal_S2,Ribosomal_S20p,Ribosomal_S3_C,Ribosomal_S6,Ribosomal_S7,Ribosomal_S8,Ribosomal_S9,RsfS,RuvX,SecE,SecG,SecY,SmpB,TsaE,UPF0054,YajC,eIF-1a,ribosomal_L24,tRNA-synt_1d,tRNA_m1G_MT,Adenylsucc_synt \
+                                --return-best-hit \
+                                --get-aa-sequences \
+                                --concatenate
+                                
+anvi-get-sequences-for-hmm-hits -c anvio_databases/CONTIGS.db \
+                                -p anvio_databases/merged_profiles/PROFILE.db \
+                                -C "FINAL_2500_filtered_wtax" \
+                                -o concatenated-nucleotides_all_ribosomalS.fa \
+                                --hmm-source Bacteria_71 \
+                                --gene-names Ribosomal_S10,Ribosomal_S11,Ribosomal_S13,Ribosomal_S15,Ribosomal_S16,Ribosomal_S17,Ribosomal_S19,Ribosomal_S2,Ribosomal_S20p,Ribosomal_S3_C,Ribosomal_S6,Ribosomal_S7,Ribosomal_S8,Ribosomal_S9 \
+                                --return-best-hit \
+                                --concatenate
+                                
+anvi-get-sequences-for-hmm-hits -c anvio_databases/CONTIGS.db \
+                                -p anvio_databases/merged_profiles/PROFILE.db \
+                                -C "FINAL_2500_filtered_wtax" \
+                                -o concatenated-proteins_all_ribosomalS.fa \
+                                --hmm-source Bacteria_71 \
+                                --gene-names Ribosomal_S10,Ribosomal_S11,Ribosomal_S13,Ribosomal_S15,Ribosomal_S16,Ribosomal_S17,Ribosomal_S19,Ribosomal_S2,Ribosomal_S20p,Ribosomal_S3_C,Ribosomal_S6,Ribosomal_S7,Ribosomal_S8,Ribosomal_S9 \
+                                --return-best-hit \
+                                --get-aa-sequences \
+                                --concatenate
+```
+This used Muscle.
+
+Now make the tree (Newick format):
+```{bash, eval=FALSE}
+anvi-gen-phylogenomic-tree -f concatenated-proteins_all_genes.fa \
+                           -o phylogenomic-tree_all_genes.txt
+                           
+anvi-gen-phylogenomic-tree -f concatenated-proteins_ribosomalS.fa \
+                           -o phylogenomic-tree_ribosomalS.txt
+```
+
+# Run PathoFact using 2500 bp MAGs {.tabset}
+
+Installed following the instructions [here](https://git-r3lab.uni.lu/laura.denies/PathoFact/-/tree/master). Note that we weren't successfully able to run `git lfs install` but everything else worked so we assume this didn't matter.
+
+The config.yaml file:
+```{python, eval=FALSE}
+pathofact:
+  sample: ['SOWE_Burkholderiaceae_Limnohabitans_sp005789825_186-contigs', 'SOWE_Moraxellaceae_None_3-contigs', 'SOWE_Methylophilaceae_None_85-contigs', 'SOWE_Burkholderiaceae_None_66-contigs', 'SOWE_Aerococcaceae_None_8-contigs', 'SOWE_Burkholderiaceae_None_161-contigs', 'SOWE_Moraxellaceae_HYN0046_sp003351745_131-contigs', 'SOWE_Bacteriovoracaceae_None_211-contigs', 'SOWE_UBA7239_UBA7239_sp002333095_194-contigs', 'SOWE_Methylophilaceae_Methylopumilus_universalis_77-contigs', 'SOWE_Ilumatobacteraceae_UBA2093_sp005788815_149-contigs', 'SOWE_None_None_20-contigs', 'SOWE_Nitrospiraceae_Nitrospira_sp900170025_162-contigs', 'SOWE_Moraxellaceae_Alkanindiges_sp001982605_78-contigs', 'SOWE_Burkholderiaceae_Sphaerotilus_natans_193-contigs', 'SOWE_Burkholderiaceae_JOSHI-001_sp005403045_74-contigs', 'SOWE_Burkholderiaceae_None_213-contigs', 'SOWE_SG8-38_SG8-38_sp001303415_13-contigs', 'SOWE_Opitutaceae_Lacunisphaera_sp900104925_46-contigs', 'SOWE_Crocinitomicaceae_M0103_sp006227105_111-contigs', 'SOWE_Akkermansiaceae_UBA956_sp002293145_137-contigs', 'SOWE_Spirosomaceae_None_201-contigs', 'SOWE_None_None_196-contigs', 'SOWE_None_None_32-contigs', 'SOWE_Spirosomaceae_Flectobacillus_major_26-contigs', 'SOWE_Burkholderiaceae_Rhodoferax_sp003415675_139-contigs', 'SOWE_Moraxellaceae_Agitococcus_sp002333125_59-contigs', 'SOWE_Leptospiraceae_UBA2033_sp002333425_47-contigs', 'SOWE_Microbacteriaceae_Rhodoglobus_sp004297555_166-contigs', 'SOWE_Burkholderiaceae_None_151-contigs', 'SOWE_Burkholderiaceae_None_33-contigs', 'SOWE_Burkholderiaceae_JOSHI-001_sp005403045_172-contigs', 'SOWE_Burkholderiaceae_None_70-contigs', 'SOWE_Rhodobacteraceae_Pseudorhodobacter_sp000176015_108-contigs', 'SOWE_EnvOPS12_None_160-contigs', 'SOWE_Burkholderiaceae_None_86-contigs', 'SOWE_None_None_157-contigs', 'SOWE_Burkholderiaceae_None_133-contigs', 'SOWE_Burkholderiaceae_Rubrivivax_sp001464055_169-contigs', 'SOWE_Spirosomaceae_Arcicella_aurantiaca_54-contigs', 'SOWE_Nitrososphaeraceae_TA-21_sp005877345_106-contigs', 'SOWE_Saprospiraceae_OLB8_sp001567405_112-contigs', 'SOWE_Burkholderiaceae_None_102-contigs', 'SOWE_Polyangiaceae_None_123-contigs', 'SOWE_Sphingobacteriaceae_None_146-contigs', 'SOWE_Flavobacteriaceae_None_159-contigs', 'SOWE_Pseudomonadaceae_None_140-contigs', 'SOWE_Moraxellaceae_HYN0046_sp003351745_176-contigs', 'SOWE_Rhodocyclaceae_None_14-contigs', 'SOWE_Weeksellaceae_Kaistella_chaponense_28-contigs', 'SOWE_BACL12_UBA7236_sp002473275_5-contigs', 'SOWE_Burkholderiaceae_None_116-contigs', 'SOWE_Xanthomonadaceae_Arenimonas_oryziterrae_91-contigs', 'SOWE_None_None_122-contigs', 'SOWE_None_None_132-contigs', 'SOWE_Burkholderiaceae_None_64-contigs', 'SOWE_None_None_95-contigs', 'SOWE_B-17BO_UBA2475_sp002319075_43-contigs', 'SOWE_Rhodocyclaceae_None_152-contigs', 'SOWE_Polyangiaceae_Polyangium_fumosum_181-contigs', 'SOWE_B-17BO_UBA4416_sp002420145_101-contigs', 'SOWE_Spirosomaceae_None_73-contigs', 'SOWE_None_None_130-contigs', 'SOWE_UBA953_None_55-contigs', 'SOWE_None_None_167-contigs', 'SOWE_Arcobacteraceae_Aliarcobacter_caeni_200-contigs', 'SOWE_Burkholderiaceae_None_141-contigs', 'SOWE_Verrucomicrobiaceae_None_127-contigs', 'SOWE_None_None_190-contigs', 'SOWE_None_None_125-contigs', 'SOWE_None_None_174-contigs', 'SOWE_None_None_61-contigs', 'SOWE_Burkholderiaceae_Sphaerotilus_natans_180-contigs', 'SOWE_None_None_148-contigs', 'SOWE_Moraxellaceae_None_214-contigs', 'SOWE_Xanthomonadaceae_Arenimonas_sp001801685_94-contigs', 'SOWE_Burkholderiaceae_None_185-contigs', 'SOWE_Leptotrichiaceae_None_45-contigs', 'SOWE_Burkholderiaceae_None_178-contigs', 'SOWE_None_None_63-contigs', 'SOWE_Burkholderiaceae_None_118-contigs', 'SOWE_Flavobacteriaceae_None_184-contigs', 'SOWE_Pseudomonadaceae_None_79-contigs', 'SOWE_Moraxellaceae_UBA2031_sp003543245_56-contigs', 'SOWE_None_None_170-contigs', 'SOWE_B-17BO_UBA4416_sp002420145_144-contigs', 'SOWE_None_None_113-contigs', 'SOWE_Polyangiaceae_Polyangium_fumosum_34-contigs', 'SOWE_B-17BO_UBA2475_sp002319075_49-contigs', 'SOWE_Rhabdochlamydiaceae_Rhabdochlamydia_sp901000775_22-contigs', 'SOWE_Weeksellaceae_None_12-contigs', 'SOWE_Burkholderiaceae_None_52-contigs', 'SOWE_Burkholderiaceae_JOSHI-001_sp001770815_44-contigs', 'SOWE_Verrucomicrobiaceae_Prosthecobacter_sp003506995_188-contigs', 'SOWE_Rhodocyclaceae_Zoogloea_ramigera_195-contigs', 'SOWE_Rhodocyclaceae_Azonexus_aromatica_205-contigs', 'SOWE_Rhodocyclaceae_Zoogloea_ramigera_134-contigs', 'SOWE_Arcobacteraceae_Aliarcobacter_cryaerophilus_41-contigs', 'SOWE_Gallionellaceae_None_37-contigs', 'SOWE_Sphi$gomonadaceae_None_110-contigs', 'SOWE_Burkholderiaceae_None_136-contigs', 'SOWE_Burkholderiaceae_Rhodoferax_sp002381045_147-contigs', 'SOWE_Burkholder$aceae_None_206-contigs', 'SOWE_Burkholderiaceae_None_99-contigs', 'SOWE_Sphingomonadaceae_None_2-contigs', 'SOWE_None_None_105-contigs', 'SOWE_Sphingo$onadaceae_Sphingorhabdus_contaminans_87-contigs', 'SOWE_None_None_168-contigs', 'SOWE_Palsa-1005_REAM01_sp004293675_29-contigs', 'SOWE_Burkholderiaceae_Giesbergeria_psychrophila_198-contigs', 'SOWE_Burkholderiaceae_JOSHI-001_sp001770815_179-contigs', 'SOWE_Burkholderiaceae_Giesbergeria_suum_38-contigs', 'SOWE_AWTP1-31_AWTP1-31_sp003962975_72-contigs', 'SOWE_Moraxellaceae_UBA2031_sp002333145_4-contigs', 'SOWE_Burkholderiaceae_None_155-contigs', 'SOWE_Burkholderiaceae_None_69-contigs', 'SOWE_Hyphomonadaceae_UBA7672_sp002483135_171-contigs', 'SOWE_None_None_98-contigs', 'SOWE_Burkholderiaceae_Rhizobacter_sp001425865_135-contigs', 'SOWE_Burkholderiaceae_Hydromonas_sp003339525_92-contigs', 'SOWE_Burkholderiaceae_None_210-contigs', 'SOWE_Flavobacteriaceae_None_35-contigs', 'SOWE_Diplorickettsiaceae_Rickettsiella_sp002290645_58-contigs', 'SOWE_UBA10799_UBA10799_sp003452655_57-contigs', 'SOWE_AWTP1-31_AWTP1-31_sp003962975_128-contigs', 'SOWE_Burkholderiaceae_JOSHI-001_sp005403045_209-contigs', 'SOWE_Polyangiaceae_None_82-contigs', 'SOWE_Caedimonadaceae_Caedimonas_varicaedens_53-contigs', 'SOWE_Rhodocyclaceae_None_10-contigs', 'SOWE_Saprospiraceae_Haliscomenobacter_hydrossis_153-contigs', 'SOWE_Burkholderiaceae_Hydromonas_sp003339525_11-contigs', 'SOWE_UBA953_UBA8828_sp003485955_16-contigs', 'SOWE_None_None_163-contigs', 'SOWE_None_None_104-contigs', 'SOWE_Burkholderiaceae_None_145-contigs', 'SOWE_Thiotrichaceae_Thiolinea_eikelboomii_6-contigs', 'SOWE_UBA4408_UBA4408_sp002389785_40-contigs', 'SOWE_Sphingomonadaceae_None_67-contigs', 'SOWE_None_None_75-contigs', 'SOWE_UBA955_UBA955_sp002293105_36-contigs', 'SOWE_Sphingomonadaceae_Polymorphobacter_sp004681125_115-contigs', 'SOWE_None_None_187-contigs', 'SOWE_Nannocystaceae_Enhygromyxa_salina_31-contigs', 'SOWE_Burkholderiaceae_Leptothrix_cholodnii_65-contigs', 'SOWE_Burkholderiaceae_None_177-contigs', 'SOWE_UBA2999_Gp6-AA45_sp003222535_7-contigs', 'SOWE_Arcobacteraceae_Aliarcobacter_cloacae_191-contigs', 'SOWE_Burkholderiaceae_None_202-contigs', 'SOWE_Burkholderiaceae_None_124-contigs', 'SOWE_Flavobacteriaceae_Flavobacterium_glycines_21-contigs', 'SOWE_None_None_18-contigs', 'SOWE_Burkholderiaceae_None_208-contigs', 'SOWE_Chitinophagaceae_Ferruginibacter_sp003455235_30-contigs', 'SOWE_Nitrospiraceae_None_97-contigs', 'SOWE_Rhodocyclaceae_None_23-contigs', 'SOWE_Opitutaceae_None_76-contigs', 'SOWE_Burkholderiaceae_None_154-contigs', 'SOWE_None_None_84-contigs', 'SOWE_Rhodocyclaceae_None_89-contigs', 'SOWE_Burkholderiaceae_None_39-contigs', 'SOWE_Rhodanobacteraceae_Dokdonella_sp001899855_19-contigs', 'SOWE_SG8-38_UBA1660_sp002320815_51-contigs', 'SOWE_EnvOPS12_None_121-contigs', 'SOWE_Burkholderiaceae_None_83-contigs', 'SOWE_Xanthomonadaceae_Thermomonas_sp006337105_164-contigs', 'SOWE_Rhodobacteraceae_None_143-contigs', 'SOWE_Burkholderiaceae_None_142-contigs', 'SOWE_None_None_199-contigs', 'SOWE_Ilumatobacteraceae_UBA2093_sp005788815_150-contigs', 'SOWE_Burkholderiaceae_None_120-contigs', 'SOWE_Burkholderiaceae_Vitreoscilla_sp004359425_183-contigs', 'SOWE_Aeromonadaceae_None_107-contigs', 'SOWE_Streptococcaceae_None_62-contigs', 'SOWE_Burkholderiaceae_None_24-contigs', 'SOWE_Burkholderiaceae_None_100-contigs', 'SOWE_Methylophilaceae_Methylopumilus_universalis_42-contigs', 'SOWE_Propionibacteriaceae_Micropruina_glycogenica_204-contigs', 'SOWE_Crocinitomicaceae_M0103_sp006227105_175-contigs', 'SOWE_Nanopelagicaceae_Planktophila_limnetica_197-contigs', 'SOWE_Burkholderiaceae_Malikia_spinosa_215-contigs', 'SOWE_Spirosomaceae_Arcicella_aurantiaca_48-contigs', 'SOWE_Pseudomonadaceae_None_158-contigs', 'SOWE_2013-40CM-41-45_SHNE01_sp004295015_68-contigs', 'SOWE_Burkholderiaceae_None_93-contigs', 'SOWE_UBA11063_UBA11063_sp003963245_60-contigs', 'SOWE_Burkholderiaceae_Rhodoferax_sp002413825_81-contigs', 'SOWE_Burkholderiaceae_None_173-contigs', 'SOWE_Cyclobacteriaceae_None_9-contigs', 'SOWE_Moraxellaceae_None_27-contigs', 'SOWE_None_None_129-contigs', 'SOWE_Flavobacteriaceae_None_189-contigs', 'SOWE_Chitinophagaceae_None_114-contigs', 'SOWE_None_None_90-contigs', 'SOWE_Turneriellaceae_Turneriella_parva_50-contigs', 'SOWE_Burkholderiaceae_Rhizobacter_sp001425865_156-contigs', 'SOWE_None_None_119-contigs', 'SOWE_Chitinophagaceae_None_15-contigs', 'SOWE_Burkholderiaceae_None_203-contigs', 'SOWE_Chitinophagaceae_None_192-contigs', 'SOWE_Burkholderiaceae_Aquabacterium_sp004297345_138-contigs', 'SOWE_Palsa-1005_REAM01_sp004293675_182-contigs', 'SOWE_Burkholderiaceae_Rhodoferax_sp005793295_212-contigs', 'SOWE_Spirosomaceae_Arcicella_aurantiaca_71-contigs', 'SOWE_Burkholderiaceae_None_96-contigs', 'SOWE_Burkholderiaceae_Hydrogenophaga_sp002001205_88-contigs', 'SOWE_Burkholderiaceae_Undibacterium_sp003970805_126-contigs', 'SOWE_Enterobacteriaceae_None_1-contigs', 'SOWE_Burkholderiaceae_None_117-contigs', 'SOWE_UBA953_UBA953_sp002293065_25-contigs', 'SOWE_Akkermansiaceae_UBA956_sp002293145_165-contigs', 'SOWE_Burkholderiaceae_Hydromonas_sp003339525_103-contigs', 'SOWE_Burkholderiaceae_None_207-contigs', 'SOWE_Burkholderiaceae_None_109-contigs', 'SOWE_None_None_17-contigs', 'SOWE_UBA7239_UBA7239_sp002333095_80-contigs'] # requires user input
+  project: PathoFact_results # requires user input
+  datadir:  /home/vinko/contigs_bins/ # requires user input
+  workflow: "complete" #options: "complete", "AMR", "Tox", "Vir"
+  size_fasta: 10000 #Adjustable to preference
+  scripts: "scripts"
+  signalp: "/home/vinko/tools/signalp-5.0b/bin" # requires user input
+  deepvirfinder: "submodules/DeepVirFinder/dvf.py"
+  tox_hmm: "databases/toxins/combined_Toxin.hmm"
+  tox_lib: "databases/library_HMM_Toxins.csv"
+  tox_threshold: 40 #Bitscore threshold of the toxin prediction, adjustable by user to preference
+  vir_hmm: "databases/virulence/Virulence_factor.hmm"
+  vir_domains: "databases/models_and_domains"
+  plasflow_threshold: 0.7
+  plasflow_minlen: 1000
+  runtime:
+    short: "00:10:00"
+    medium: "01:00:00"
+    long: "02:00:00"
+  mem:
+    normal_mem_per_core_gb: "4G"
+    big_mem_cores: 24
+    big_mem_per_core_gb: "30G"
+```
+
+PathoFact was then run using:
+```{bash, eval=FALSE}
+conda activate PathoFact
+snakemake -s Snakefile --use-conda --reason --cores 10 -p
+```
+
+Note that we were unable to run this using more threads as it then requires very large amounts of memory (>500GB), I think for SignalP.
+
+# GapSeq
+
+Installed as instructions.
+
+Run:
+```{bash, eval=FALSE}
+./gapseq doall /home/robyn/vinko/gapseq/SOWE_Pseudomonadaceae_None_140-contigs.fa
+```

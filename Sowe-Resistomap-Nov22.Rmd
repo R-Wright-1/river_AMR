@@ -1,0 +1,1103 @@
+---
+title: "Sowe Resistomap"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+fig_width: 10
+fig_height: 10
+---
+
+```{R, results='hide', fig.keep='all', message=FALSE, include=FALSE}
+options(warn = -1) 
+library(reticulate)
+#library(kableExtra)
+library(knitr)
+library(ALDEx2)
+library(Maaslin2)
+conda_python(envname = 'r-reticulate', conda = "auto")
+```
+
+```{python, results='hide', fig.keep='all', include=FALSE}
+import os
+import pandas as pd
+import pickle
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from matplotlib.patches import Ellipse
+import matplotlib.transforms as transforms
+import matplotlib.patches as mpatches
+import numpy as np
+from numpy.linalg import norm
+from scipy.spatial import distance
+from scipy.stats import ttest_ind
+import scipy.spatial.distance as ssd
+from scipy.cluster import hierarchy
+from scipy.interpolate import interp1d
+from skbio.stats.composition import clr
+from skbio.stats import ordination
+from skbio.diversity import alpha_diversity
+from skbio import diversity
+from skbio.diversity import beta_diversity
+from skbio.stats.distance import mantel
+from deicode.preprocessing import rclr
+from Bio import Phylo
+from skbio.tree import TreeNode
+from skbio import read
+from ete3 import Tree
+from matplotlib.offsetbox import AnchoredText
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+from bioinfokit.analys import stat
+res = stat()
+
+folder = '/Users/robynwright/Dropbox/Langille_Lab_postdoc/Sowe_AMR_degradation/resistomap/'
+sample_color = {'Wood':'#CB4335', 'Weathered LDPE':'#8E44AD', 'W-LDPE':'#8E44AD', 'LDPE':'#2E86C1', 'Water':'#F1C40F', 'Sediment':'#E67E22'}
+samples = {1:'PP control', 2:'PP + Antibiotics', 3:'PE control', 4:'PE + Antibiotics', 5:'Wood control', 6:'Wood + Antibiotics', 7:'Water control', 8:'Water + Antibiotics', 9:'Sediment control', 10:'Sediment + Antibiotics', 11:'qPCR_water1', 12:'qPCR_water2'}
+```
+
+***Need to change e.g. qacE_2 to qacE delta 2***
+
+# Re-make numbers of detected genes file
+
+With mphE being with MLS/MLSB instead of "Other", the Numbers_of_detected_genes.csv file is therefore wrong. I'll save this as Numbers_of_detected_genes_original.csv
+```{python}
+abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=0, header=0).fillna(value=0)
+names_rename = {}
+for sample in abundances.columns:
+  names_rename[sample] = sample.replace('A', '').replace('B', '').replace('C', '')
+abundances = abundances.rename(columns=names_rename)
+abundances = abundances.groupby(by=abundances.columns, axis=1).sum()
+abundances = abundances.drop(['assay', 'gene'], axis=1).drop(['16S rRNA'], axis=0)
+abundances[abundances > 0] = 1
+classes = list(abundances.index.values)
+abundances = abundances.groupby(by=abundances.index, axis=0).sum().transpose()
+classes_rename = {}
+for cls in abundances.columns:
+  classes_rename[cls] = cls+' ('+str(classes.count(cls))+')'
+abundances = abundances.rename(columns=classes_rename).loc[[str(a+1) for a in range(12)], :]
+abundances['Total number of detected genes'] = abundances.sum(axis=1)
+cols = ['Description']+list(abundances.columns)
+abundances['Description'] = [samples[a+1] for a in range(12)]
+abundances = abundances.loc[:, cols]
+abundances.rename_axis('Sample number', inplace=True)
+abundances.to_csv(folder+'Numbers_of_detected_genes.csv')
+```
+
+# Number of genes
+
+```{python}
+plt.close()
+plt.figure(figsize=(10,6))
+ax1 = plt.subplot2grid((10,1), (0,0), rowspan=8)
+ax2 = plt.subplot2grid((10,1), (8,0))
+plt.sca(ax1)
+num_genes = pd.read_csv(folder+'Numbers_of_detected_genes.csv', index_col=0, header=0)
+num_genes = num_genes.drop(['Description', 'Total number of detected genes'], axis=1).drop([11, 12], axis=0).transpose()
+num_genes = num_genes.iloc[::-1]
+
+ax1.pcolor(num_genes, edgecolor='k')
+
+plt.yticks([x+0.5 for x in range(len(num_genes.index.values))], num_genes.index.values)
+plt.xticks([x+0.5 for x in range(len(num_genes.columns))], [samples[x] for x in num_genes.columns], rotation=90)
+
+for a in range(len(num_genes.index.values)):
+  for b in range(len(num_genes.columns)):
+    num = num_genes.iloc[a, b]
+    if num < 2: col = 'w'
+    else: col = 'k'
+    ax1.text(b+0.5, a+0.5, str(num), color=col, ha='center', va='center')
+    
+ax1.xaxis.tick_top()
+
+num_genes = pd.read_csv(folder+'Numbers_of_detected_genes.csv', index_col=0, header=0)
+num_genes = num_genes.drop(['Description', 'Aminoglycoside (2)', 'MDR (19)', 'MLSB (8)', 'Quinolone (1)', 'Sulfonamide (4)', 'Tetracycline (9)', 'Taxonomic (5)', 'Other (5)'], axis=1).drop([11, 12], axis=0).transpose()
+
+plt.sca(ax2)
+ax2.pcolor(num_genes, edgecolor='k', cmap='Reds')
+plt.yticks([0.5], ['Total number of detected genes']), plt.xticks([])
+
+for b in range(len(num_genes.columns)):
+  num = num_genes.iloc[0, b]
+  if num < 9: col = 'k'
+  else: col = 'w'
+  ax2.text(b+0.5, 0.5, str(num), color=col, ha='center', va='center')
+
+#plt.show()
+plt.savefig(folder+'number_of_genes.png', bbox_inches='tight', dpi=600)
+```
+
+# Relative abundances
+
+## Individual genes tests
+
+```{python}
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0).fillna(value=0).drop(['group', 'gene'], axis=1)
+
+for assay in relative_abundances.index.values:
+  #if assay != 'AY242': continue
+  new_df = []
+  for column in relative_abundances.columns:
+    col = int(column[:-1])
+    if col in [11, 12]: continue
+    treat = samples[col].split(' ')
+    new_df.append([treat[0], treat[-1], relative_abundances.loc[assay, column]])
+  new_df = pd.DataFrame(new_df, columns=['Surface', 'Antibiotics', 'Value'])
+  model = ols('Value ~ C(Surface) + C(Antibiotics) + C(Surface):C(Antibiotics)', data=new_df).fit()
+  anova_table = sm.stats.anova_lm(model, typ=2)
+  res.tukey_hsd(df=new_df, res_var='Value', xfac_var='Surface', anova_model='Value ~ C(Surface) + C(Antibiotics) + C(Surface):C(Antibiotics)')
+  surface = res.tukey_summary
+  res.tukey_hsd(df=new_df, res_var='Value', xfac_var='Antibiotics', anova_model='Value ~ C(Antibiotics) + C(Surface) + C(Antibiotics):C(Surface)')
+  antibiotics = res.tukey_summary
+  combined = pd.concat([surface, antibiotics])
+  anova_table.to_csv(folder+'anova/'+assay+'_anova.csv')
+  combined.to_csv(folder+'anova/'+assay+'_tukeys_hsd.csv')
+```
+
+Plot:
+```{python}
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0).fillna(value=0).drop(['group', 'gene'], axis=1)
+comparisons = []
+comp_added = False
+all_anova_p, all_anova_f, all_tukeys_p = [], [], []
+
+for assay in relative_abundances.index.values:
+  #if assay != 'AY242': continue
+  anova = pd.read_csv(folder+'anova/'+assay+'_anova.csv', index_col=0, header=0)
+  this_anova_p, this_anova_f, tukeys_p = [], [], []
+  for row in anova.index.values:
+    if row == 'Residual': continue
+    this_anova_p.append(anova.loc[row, 'PR(>F)'])
+    this_anova_f.append(anova.loc[row, 'F'])
+  tukeys = pd.read_csv(folder+'anova/'+assay+'_tukeys_hsd.csv', header=0).drop('Unnamed: 0', axis=1)
+  for row in tukeys.index.values:
+    if not comp_added:
+      comparisons.append(tukeys.loc[row, 'group1']+' '+tukeys.loc[row, 'group2'])
+    tukeys_p.append(tukeys.loc[row, 'p-value'])
+  comp_added = True
+  all_anova_p.append(this_anova_p)
+  all_anova_f.append(this_anova_f)
+  all_tukeys_p.append(tukeys_p)
+
+all_anova_p = pd.DataFrame(all_anova_p, index=relative_abundances.index.values, columns=['Surface', 'Antibiotics', 'Surface:Antibiotics'])
+all_anova_f = pd.DataFrame(all_anova_f, index=relative_abundances.index.values, columns=['Surface', 'Antibiotics', 'Surface:Antibiotics'])
+all_tukeys_p = pd.DataFrame(all_tukeys_p, index=relative_abundances.index.values, columns=comparisons)
+
+relative_abundances = relative_abundances.iloc[::-1]
+rename_col = {}
+for col in relative_abundances.columns: rename_col[col] = col[:-1]
+relative_abundances = relative_abundances.rename(columns=rename_col)
+relative_abundances = relative_abundances.groupby(by=relative_abundances.columns, axis=1).mean()
+relative_abundances = relative_abundances.drop('AY1', axis=0).loc[:, ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10']]
+relative_abundances = relative_abundances[relative_abundances.max(axis=1) > 0]
+relative_abundances = relative_abundances*100
+ra_log = relative_abundances.copy(deep=True)
+ra_log = ra_log+min(ra_log[ra_log > .0].min(axis=1))/100
+ra_log = np.log10(ra_log)
+
+all_anova_p = all_anova_p.loc[relative_abundances.index.values, :]
+all_anova_f = all_anova_f.loc[relative_abundances.index.values, :]
+all_tukeys_p = all_tukeys_p.loc[relative_abundances.index.values, :]
+
+rel_abun_rename = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0)
+ra_rename_dict = {}
+for row in rel_abun_rename.index.values:
+  if 'qacE_' in rel_abun_rename.loc[row, 'gene']:
+    ra_rename_dict[row] = rel_abun_rename.loc[row, 'gene'].replace('qacE_', r'qacE$\Delta$')+': '+rel_abun_rename.loc[row, 'group']
+  else:
+    ra_rename_dict[row] = rel_abun_rename.loc[row, 'gene']+': '+rel_abun_rename.loc[row, 'group']
+
+fig = plt.figure(figsize=(20,10))
+ax1 = plt.subplot2grid((1,8), (0,0), colspan=4)
+anova = plt.subplot2grid((1,8), (0,4))
+tukeys = plt.subplot2grid((1,8), (0,5), colspan=2)
+
+plt.sca(ax1)
+pc = ax1.pcolor(ra_log, edgecolor='k')
+
+for a in range(len(relative_abundances.index.values)):
+  for b in range(len(relative_abundances.columns)):
+    num = relative_abundances.iloc[a, b]
+    if num != 0: tx = ax1.text(b+0.5, a+0.5, str(round(num, 3)), ha='center', va='center')
+
+yt = plt.yticks([x+0.5 for x in range(len(relative_abundances.index.values))], [ra_rename_dict[x] for x in relative_abundances.index.values])
+xt = plt.xticks([x+0.5 for x in range(len(relative_abundances.columns))], [samples[int(x)] for x in relative_abundances.columns], rotation=90)
+tt = ax1.xaxis.tick_top()
+
+plt.sca(anova)
+all_anova_p[all_anova_p > 0.05] = 0.1
+pc = anova.pcolor(all_anova_p, edgecolor='k', cmap='hot_r')
+
+for a in range(len(all_anova_f.index.values)):
+  for b in range(len(all_anova_f.columns)):
+    num = all_anova_f.iloc[a, b]
+    if num != 0: tx = anova.text(b+0.5, a+0.5, str(round(num, 3)), ha='center', va='center')
+
+yt = plt.yticks([])
+xt = plt.xticks([x+0.5 for x in range(len(all_anova_p.columns))], all_anova_p.columns, rotation=90)
+tt = anova.xaxis.tick_top()
+
+all_tukeys_p = all_tukeys_p.loc[:, ['control Antibiotics']+list(all_tukeys_p.columns)[:-1]].rename(columns={'control Antibiotics':'Antibiotics'})
+
+tp_fake = all_tukeys_p.copy(deep=True)
+tp_fake[tp_fake > 0.05] = 0.05
+tp_fake[tp_fake < 0.05] = 0
+
+plt.sca(tukeys)
+pc = tukeys.pcolor(tp_fake, edgecolor='k', cmap='binary')
+
+for a in range(len(all_tukeys_p.index.values)):
+  for b in range(len(all_tukeys_p.columns)):
+    num = all_tukeys_p.iloc[a, b]
+    if num > 0.05: string = ''
+    if num <= 0.05: string = '*'
+    if num <= 0.01: string = '**'
+    if num <= 0.005: string = '***'
+    tx = tukeys.text(b+0.5, a+0.4, string, ha='center', va='center')
+
+yt = plt.yticks([])
+xt = plt.xticks([x+0.5 for x in range(len(all_tukeys_p.columns))], [x.replace(' ', ' x ') for x in all_tukeys_p.columns], rotation=90)
+tt = tukeys.xaxis.tick_top()
+
+ti = ax1.set_title('Abundance relative to 16S rRNA gene (%)', fontweight='bold')
+ti = anova.set_title('Two factor ANOVA', fontweight='bold')
+ti = tukeys.set_title('Tukey’s HSD post hoc comparisons', fontweight='bold')
+
+#plt.show()
+plt.savefig(folder+'abundance_all_genes.png', bbox_inches='tight', dpi=600)
+```
+
+## Grouped genes tests
+
+```{python}
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=0, header=0).fillna(value=0).drop(['gene', 'assay'], axis=1).drop(['16S rRNA'], axis=0)
+relative_abundances = relative_abundances.groupby(by=relative_abundances.index, axis=0).sum()
+
+for assay in relative_abundances.index.values:
+  #if assay != 'AY242': continue
+  new_df = []
+  for column in relative_abundances.columns:
+    col = int(column[:-1])
+    if col in [11, 12]: continue
+    treat = samples[col].split(' ')
+    new_df.append([treat[0], treat[-1], relative_abundances.loc[assay, column]])
+  new_df = pd.DataFrame(new_df, columns=['Surface', 'Antibiotics', 'Value'])
+  model = ols('Value ~ C(Surface) + C(Antibiotics) + C(Surface):C(Antibiotics)', data=new_df).fit()
+  anova_table = sm.stats.anova_lm(model, typ=2)
+  res.tukey_hsd(df=new_df, res_var='Value', xfac_var='Surface', anova_model='Value ~ C(Surface) + C(Antibiotics) + C(Surface):C(Antibiotics)')
+  surface = res.tukey_summary
+  res.tukey_hsd(df=new_df, res_var='Value', xfac_var='Antibiotics', anova_model='Value ~ C(Antibiotics) + C(Surface) + C(Antibiotics):C(Surface)')
+  antibiotics = res.tukey_summary
+  combined = pd.concat([surface, antibiotics])
+  anova_table.to_csv(folder+'anova/'+assay+'_anova.csv')
+  combined.to_csv(folder+'anova/'+assay+'_tukeys_hsd.csv')
+
+
+finished = True
+```
+
+Plot:
+```{python}
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=0, header=0).fillna(value=0).drop(['gene', 'assay'], axis=1).drop(['Taxonomic', '16S rRNA'], axis=0)
+relative_abundances = relative_abundances.groupby(by=relative_abundances.index, axis=0).sum().loc[['Aminoglycoside', 'MDR', 'MLSB', 'Quinolone', 'Sulfonamide', 'Tetracycline', 'Other'], :]
+relative_abundances = relative_abundances*100
+x = [1, 0, 1, 3, 4, 6, 7, 9, 10, 12, 13]
+names = [samples[y] for y in range(1,11)]
+
+fig = plt.figure(figsize=(10,20))
+for a in range(len(relative_abundances.index.values)):
+  ax_abun = plt.subplot2grid((7,9), (a,0), colspan=5)
+  ax_test_anova = plt.subplot2grid((7,18), (a,11), frameon=False, colspan=2)
+  ax_test_tukeys = plt.subplot2grid((7,18), (a,13), colspan=5, frameon=False)
+  plt.sca(ax_abun)
+  for b in range(1, 11):
+    group = []
+    for c in relative_abundances.columns:
+      if c[:-1] == str(b):
+        group.append(relative_abundances.loc[relative_abundances.index.values[a], c])
+    scat = ax_abun.scatter(np.random.normal(x[b], 0.1, 3), group, color='k', alpha=0.5, s=10)
+    box = ax_abun.boxplot(group, positions=[x[b]], widths=0.8, showfliers=False)
+    for item in ['boxes', 'whiskers', 'fliers', 'medians', 'caps']: bx = plt.setp(box[item], color='k')
+  if a == 6: xt = plt.xticks(x[1:], names, rotation=90)
+  else: xt = plt.xticks(x[1:], [], rotation=90)
+  #if a == 3: yl = plt.ylabel('Abundance relative to 16S rRNA gene (%)', fontweight='bold')
+  plt.ylabel(r"$\bf{"+relative_abundances.index.values[a]+"}$"+'\nAbundance (%)')
+  anova = pd.read_csv(folder+'anova/'+relative_abundances.index.values[a]+'_anova.csv', index_col=0, header=0)
+  anova_p, anova_f = [], []
+  for row in anova.index.values:
+    if row == 'Residual': continue
+    anova_p.append(anova.loc[row, 'PR(>F)'])
+    anova_f.append(anova.loc[row, 'F'])
+  anova_p = pd.DataFrame([anova_p], columns=['Surface', 'Antibiotics', 'Surface:Antibiotics']).transpose()
+  anova_p = anova_p.iloc[::-1]
+  anova_f = pd.DataFrame([anova_f], columns=['Surface', 'Antibiotics', 'Surface:Antibiotics']).transpose()
+  anova_f = anova_f.iloc[::-1]
+  anova_p_copy = anova_p.copy(deep=True)
+  anova_p_copy[anova_p_copy > 0.05] = 0.1
+  pc = ax_test_anova.pcolor(anova_p_copy, edgecolor='k', cmap='hot_r')
+  plt.sca(ax_test_anova)
+  yl = plt.ylim([-1, 4])
+  xt = plt.xticks([])
+  yt = plt.yticks([0.5, 1.5, 2.5], ['S:A', 'A', 'S'])
+  for g in range(len(anova_p.index.values)):
+    for h in range(len(anova_p.columns)):
+      string = 'F='+str(round(anova_f.iloc[g, h], 3))+'\n'
+      string += '$p$='+str(round(anova_p.iloc[g, h], 3))
+      if anova_p.iloc[g, h] >= 0.05: col = 'w'
+      else: col = 'k'
+      tx = ax_test_anova.text(h+0.5, g+0.5, string, ha='center', va='center', color=col)
+  plt.sca(ax_test_tukeys)
+  new_tukeys = []
+  tukeys = pd.read_csv(folder+'anova/'+relative_abundances.index.values[a]+'_tukeys_hsd.csv', index_col=0, header=0)
+  tukeys = tukeys.set_index(['group1', 'group2'])
+  group_comp = ['PP', 'PE', 'Wood', 'Water', 'Sediment']
+  done = []
+  for group1 in group_comp:
+    this_comp = []
+    for group2 in group_comp:
+      if group1 == group2: 
+        this_comp.append(1)
+      elif [group1, group2] in done or [group2, group1] in done:
+        this_comp.append(1)
+      else:
+        this_comp.append(tukeys.loc[(group1, group2), 'p-value'])
+      done.append([group1, group2])
+    new_tukeys.append(this_comp)
+  new_tukeys = pd.DataFrame(new_tukeys, columns=group_comp, index=group_comp)
+  new_tukeys = new_tukeys.iloc[::-1]
+  ax_test_tukeys.pcolor(new_tukeys, cmap='hot')
+  for g in range(len(new_tukeys.index.values)):
+    for h in range(len(new_tukeys.columns)):
+      num = new_tukeys.iloc[g, h]
+      if num == 1: continue
+      if num < 0.4: col = 'w'
+      else: col = 'k'
+      tx = ax_test_tukeys.text(h+0.5, g+0.5, str(round(num, 3)), ha='center', va='center', color=col)
+      pl = ax_test_tukeys.plot([h, h+1, h+1, h, h], [g, g, g+1, g+1, g], 'k-', lw=0.2)
+  if a == 0: xt = plt.xticks([x+0.5 for x in range(len(new_tukeys.columns))], [x.replace(' ', ' x ') for x in new_tukeys.columns], rotation=90)
+  else: xt = plt.xticks([x+0.5 for x in range(len(new_tukeys.columns))], [])
+  yt = plt.yticks([x+0.5 for x in range(len(new_tukeys.index.values))], [x.replace(' ', ' x ') for x in new_tukeys.index.values])
+  xl = plt.xlim([1, 5])
+  yl = plt.ylim([1, 5])
+  tt = ax_test_tukeys.xaxis.tick_top()
+  tt = ax_test_tukeys.yaxis.tick_right()
+  if a == 0:
+    ti = ax_abun.set_title('Abundance relative to 16S rRNA gene', fontweight='bold')
+    ti = ax_test_anova.set_title('Two factor\nANOVA', fontweight='bold')
+    ti = ax_test_tukeys.set_title('Tukey’s HSD\npost hoc\ncomparisons', fontweight='bold')
+
+
+#plt.show()
+plt.savefig(folder+'abundance_grouped.png', bbox_inches='tight', dpi=600)
+```
+
+## Combined figure
+
+```{python}
+plt.figure(figsize=(25,20))
+ax1 = plt.subplot2grid((38,26),(0,0), rowspan=8,colspan=10) #number_of_genes
+ax1b = plt.subplot2grid((38,26),(0,10), rowspan=8,colspan=3) #number_of_genes statistical tests
+ax2 = plt.subplot2grid((38,26),(8,0), colspan=10) #number_of_genes total
+ax3 = plt.subplot2grid((38,26),(10,0), rowspan=28, colspan=10) #abundance_all_genes
+ax3b = plt.subplot2grid((38,26),(10,10), rowspan=28, colspan=3) #abundance_all_genes statistical tests
+
+plt.sca(ax1)
+num_genes = pd.read_csv(folder+'Numbers_of_detected_genes.csv', index_col=0, header=0)
+num_genes = num_genes.drop(['Description', 'Total number of detected genes'], axis=1).drop([11, 12], axis=0).transpose()
+num_genes = num_genes.iloc[::-1]
+
+ax1.pcolor(num_genes, edgecolor='k', cmap='cividis')
+plt.yticks([x+0.5 for x in range(len(num_genes.index.values))], num_genes.index.values)
+plt.xticks([])
+plt.title('Number of ARGs detected', fontweight='bold'), plt.title('A', fontweight='bold', loc='left', fontsize=16)
+
+for a in range(len(num_genes.index.values)):
+  for b in range(len(num_genes.columns)):
+    num = num_genes.iloc[a, b]
+    if num < 4: col = 'w'
+    else: col = 'k'
+    ax1.text(b+0.5, a+0.5, str(num), color=col, ha='center', va='center')
+    
+#ax1.xaxis.tick_top()
+
+num_genes = pd.read_csv(folder+'Numbers_of_detected_genes.csv', index_col=0, header=0)
+num_genes = num_genes.drop(['Description', 'Aminoglycoside (2)', 'MDR (19)', 'MLSB (8)', 'Quinolone (1)', 'Sulfonamide (4)', 'Tetracycline (9)', 'Taxonomic (5)', 'Other (5)'], axis=1).drop([11, 12], axis=0).transpose()
+
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=0, header=0).fillna(value=0).drop(['gene', 'assay'], axis=1).drop(['16S rRNA'], axis=0)
+relative_abundances = relative_abundances.groupby(by=relative_abundances.index, axis=0).sum().loc[['Aminoglycoside', 'MDR', 'MLSB', 'Quinolone', 'Sulfonamide', 'Tetracycline', 'Other'], :]
+
+all_anova_f, all_anova_p = [], []
+for a in range(len(relative_abundances.index.values)):
+  anova = pd.read_csv(folder+'anova/'+relative_abundances.index.values[a]+'_anova.csv', index_col=0, header=0)
+  anova_p, anova_f = [], []
+  for row in anova.index.values:
+    if row == 'Residual': continue
+    anova_p.append(anova.loc[row, 'PR(>F)'])
+    anova_f.append(anova.loc[row, 'F'])
+  anova_p = pd.DataFrame([anova_p], columns=['Surface', 'Antibiotics', 'Surface:Antibiotics']).transpose()
+  anova_p = anova_p.iloc[::-1]
+  anova_f = pd.DataFrame([anova_f], columns=['Surface', 'Antibiotics', 'Surface:Antibiotics']).transpose()
+  anova_f = anova_f.iloc[::-1]
+  anova_p_copy = anova_p.copy(deep=True)
+  anova_p_copy[anova_p_copy > 0.05] = 0.1
+  all_anova_p.append(anova_p_copy.rename(columns={0:relative_abundances.index.values[a]}))
+  all_anova_f.append(anova_f.rename(columns={0:relative_abundances.index.values[a]}))
+  
+all_anova_p = pd.concat(all_anova_p).fillna(value=0)
+all_anova_p = all_anova_p.groupby(by=all_anova_p.index, axis=0).sum().transpose()
+all_anova_f = pd.concat(all_anova_f).fillna(value=0)
+all_anova_f = all_anova_f.groupby(by=all_anova_f.index, axis=0).sum().transpose()
+plt.sca(ax1b)
+pc = ax1b.pcolor(all_anova_p, edgecolor='k', cmap='hot_r')
+
+for a in range(len(all_anova_f.index.values)):
+  for b in range(len(all_anova_f.columns)):
+    num = all_anova_f.iloc[a, b]
+    if num != 0: tx = ax1b.text(b+0.5, a+0.5, str(round(num, 3)), ha='center', va='center')
+    
+plt.xticks([]), plt.yticks([])
+plt.title('Two factor ANOVA', fontweight='bold')
+
+plt.sca(ax2)
+ax2.pcolor(num_genes, edgecolor='k', cmap='Reds')
+plt.yticks([0.5], ['Total number of detected genes']), plt.xticks([])
+
+for b in range(len(num_genes.columns)):
+  num = num_genes.iloc[0, b]
+  if num < 9: col = 'k'
+  else: col = 'w'
+  ax2.text(b+0.5, 0.5, str(num), color=col, ha='center', va='center')
+
+plt.sca(ax3)
+plt.xticks([x+0.5 for x in range(len(num_genes.columns))], [samples[x] for x in num_genes.columns], rotation=90)
+
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0).fillna(value=0).drop(['group', 'gene'], axis=1)
+comparisons = []
+comp_added = False
+all_anova_p, all_anova_f, all_tukeys_p = [], [], []
+
+ra_rename_dict = {}
+for row in rel_abun_rename.index.values:
+  if 'qacE_' in rel_abun_rename.loc[row, 'gene']:
+    ra_rename_dict[row] = rel_abun_rename.loc[row, 'group']+': '+rel_abun_rename.loc[row, 'gene'].replace('qacE_', r'qacE$\Delta$')
+  else:
+    ra_rename_dict[row] = rel_abun_rename.loc[row, 'group']+': '+rel_abun_rename.loc[row, 'gene']
+
+all_renamed = [ra_rename_dict[x] for x in relative_abundances.index.values]
+all_renamed = sorted(all_renamed)
+all_rename_no_other = [x for x in all_renamed if 'Other' not in x]
+all_rename_other = [x for x in all_renamed if 'Other' in x]
+all_renamed = all_rename_no_other+all_rename_other
+gene_order = []
+for gene in all_renamed:
+  for rename in ra_rename_dict:
+    if gene == ra_rename_dict[rename]:
+      gene_order.append(rename)
+
+relative_abundances = relative_abundances.loc[gene_order, :]
+
+for assay in relative_abundances.index.values:
+  #if assay != 'AY242': continue
+  anova = pd.read_csv(folder+'anova/'+assay+'_anova.csv', index_col=0, header=0)
+  this_anova_p, this_anova_f, tukeys_p = [], [], []
+  for row in anova.index.values:
+    if row == 'Residual': continue
+    this_anova_p.append(anova.loc[row, 'PR(>F)'])
+    this_anova_f.append(anova.loc[row, 'F'])
+  tukeys = pd.read_csv(folder+'anova/'+assay+'_tukeys_hsd.csv', header=0).drop('Unnamed: 0', axis=1)
+  for row in tukeys.index.values:
+    if not comp_added:
+      comparisons.append(tukeys.loc[row, 'group1']+' '+tukeys.loc[row, 'group2'])
+    tukeys_p.append(tukeys.loc[row, 'p-value'])
+  comp_added = True
+  all_anova_p.append(this_anova_p)
+  all_anova_f.append(this_anova_f)
+  all_tukeys_p.append(tukeys_p)
+
+all_anova_p = pd.DataFrame(all_anova_p, index=relative_abundances.index.values, columns=['Surface', 'Antibiotics', 'Surface:Antibiotics'])
+all_anova_f = pd.DataFrame(all_anova_f, index=relative_abundances.index.values, columns=['Surface', 'Antibiotics', 'Surface:Antibiotics'])
+all_tukeys_p = pd.DataFrame(all_tukeys_p, index=relative_abundances.index.values, columns=comparisons)
+
+relative_abundances = relative_abundances.iloc[::-1]
+rename_col = {}
+for col in relative_abundances.columns: rename_col[col] = col[:-1]
+relative_abundances = relative_abundances.rename(columns=rename_col)
+relative_abundances = relative_abundances.groupby(by=relative_abundances.columns, axis=1).mean()
+relative_abundances = relative_abundances.drop('AY1', axis=0).loc[:, ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10']]
+relative_abundances = relative_abundances[relative_abundances.max(axis=1) > 0]
+relative_abundances = relative_abundances*100
+ra_log = relative_abundances.copy(deep=True)
+ra_log = ra_log+min(ra_log[ra_log > .0].min(axis=1))/100
+ra_log = np.log10(ra_log)
+
+all_anova_p = all_anova_p.loc[relative_abundances.index.values, :]
+all_anova_f = all_anova_f.loc[relative_abundances.index.values, :]
+all_tukeys_p = all_tukeys_p.loc[relative_abundances.index.values, :]
+
+rel_abun_rename = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0)
+ra_rename_dict = {}
+for row in rel_abun_rename.index.values:
+  if 'qacE_' in rel_abun_rename.loc[row, 'gene']:
+    ra_rename_dict[row] = rel_abun_rename.loc[row, 'gene'].replace('qacE_', r'qacE$\Delta$')+' ('+rel_abun_rename.loc[row, 'group']+')'
+  else:
+    ra_rename_dict[row] = rel_abun_rename.loc[row, 'gene']+' ('+rel_abun_rename.loc[row, 'group']+')'
+
+pc = ax3.pcolor(ra_log, edgecolor='k')
+
+for a in range(len(relative_abundances.index.values)):
+  for b in range(len(relative_abundances.columns)):
+    num = relative_abundances.iloc[a, b]
+    if num != 0: tx = ax3.text(b+0.5, a+0.5, str(round(num, 3)), ha='center', va='center')
+
+yt = plt.yticks([x+0.5 for x in range(len(relative_abundances.index.values))], [ra_rename_dict[x] for x in relative_abundances.index.values])
+
+plt.sca(ax3b)
+all_anova_p[all_anova_p > 0.05] = 0.1
+pc = ax3b.pcolor(all_anova_p, edgecolor='k', cmap='hot_r')
+
+for a in range(len(all_anova_f.index.values)):
+  for b in range(len(all_anova_f.columns)):
+    num = all_anova_f.iloc[a, b]
+    if num != 0: tx = ax3b.text(b+0.5, a+0.5, str(round(num, 3)), ha='center', va='center')
+
+yt = plt.yticks([])
+xt = plt.xticks([x+0.5 for x in range(len(all_anova_p.columns))], all_anova_p.columns, rotation=90)
+
+ti = ax3.set_title('Abundance relative to 16S rRNA gene (%)', fontweight='bold')
+ti = ax3.set_title('B', fontweight='bold', loc='left', fontsize=16)
+ti = ax3b.set_title('Two factor ANOVA', fontweight='bold')
+
+
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=0, header=0).fillna(value=0).drop(['gene', 'assay'], axis=1).drop(['Taxonomic', '16S rRNA'], axis=0)
+relative_abundances = relative_abundances.groupby(by=relative_abundances.index, axis=0).sum().loc[['Aminoglycoside', 'MDR', 'MLSB', 'Quinolone', 'Sulfonamide', 'Tetracycline', 'Other'], :]
+relative_abundances = relative_abundances*100
+x = [1, 0, 1, 3, 4, 6, 7, 9, 10, 12, 13]
+names = [samples[y] for y in range(1,11)]
+
+all_anova_values = []
+for a in range(len(relative_abundances.index.values)):
+  ax_abun = plt.subplot2grid((7,26),(a,15), colspan=10)
+  if a == 0: 
+    ti = ax_abun.set_title('C', fontweight='bold', loc='left', fontsize=16)
+    ti = ax_abun.set_title('Abundance relative to 16S rRNA gene', fontweight='bold')
+  plt.sca(ax_abun)
+  for b in range(1, 11):
+    group = []
+    for c in relative_abundances.columns:
+      if c[:-1] == str(b):
+        group.append(relative_abundances.loc[relative_abundances.index.values[a], c])
+    scat = ax_abun.scatter(np.random.normal(x[b], 0.1, 3), group, color='k', alpha=0.5, s=10)
+    box = ax_abun.boxplot(group, positions=[x[b]], widths=0.8, showfliers=False)
+    for item in ['boxes', 'whiskers', 'fliers', 'medians', 'caps']: bx = plt.setp(box[item], color='k')
+  if a == 6: xt = plt.xticks(x[1:], names, rotation=90)
+  else: xt = plt.xticks(x[1:], [], rotation=90)
+  plt.ylabel(r"$\bf{"+relative_abundances.index.values[a]+"}$"+'\nAbundance (%)')
+  
+plt.savefig(folder+'combined_figure.png', bbox_inches='tight', dpi=600)
+```
+
+## Redo Figure 5
+
+```{python}
+fig = plt.figure(figsize=(15,10))
+antibiotics = ['Aminoglycoside', 'MDR', 'MLSB', 'Quinolone', 'Sulfonamide', 'Tetracycline', 'Taxonomic', 'Other']
+
+num_genes = pd.read_csv(folder+'Numbers_of_detected_genes.csv', index_col=0, header=0).drop([11, 12], axis=0).drop(['Description', 'Total number of detected genes'], axis=1)
+names, totals = {},{}
+for col in num_genes.columns:
+  names[col] = col.split(' ')[0]
+  totals[col.split(' ')[0]] = col.split('(')[1].replace(')', '')
+num_genes = num_genes.rename(columns=names)
+
+rel_abun = pd.read_csv(folder+'Relative_abundances.csv', index_col=0, header=0).fillna(value=0).drop(['gene', 'assay'], axis=1)*100
+rel_abun = rel_abun.groupby(by=rel_abun.index, axis=0).sum()
+rename_samples = {}
+for col in rel_abun.columns:
+  rename_samples[col] = int(col[:-1])
+rel_abun = rel_abun.rename(columns=rename_samples)
+
+all_anova_f, all_anova_p = [], []
+for a in range(len(rel_abun.index.values)):
+  anova = pd.read_csv(folder+'anova/'+rel_abun.index.values[a]+'_anova.csv', index_col=0, header=0)
+  anova_p, anova_f = [], []
+  for row in anova.index.values:
+    if row == 'Residual': continue
+    anova_p.append(anova.loc[row, 'PR(>F)'])
+    anova_f.append(anova.loc[row, 'F'])
+  anova_p = pd.DataFrame([anova_p], columns=['Surface', 'Antibiotics', 'Surface:Antibiotics']).transpose()
+  anova_p = anova_p.iloc[::-1]
+  anova_f = pd.DataFrame([anova_f], columns=['Surface', 'Antibiotics', 'Surface:Antibiotics']).transpose()
+  anova_f = anova_f.iloc[::-1]
+  #anova_p_copy = anova_p.copy(deep=True)
+  #anova_p_copy[anova_p_copy > 0.05] = 0.1
+  all_anova_p.append(anova_p.rename(columns={0:rel_abun.index.values[a]}))
+  all_anova_f.append(anova_f.rename(columns={0:rel_abun.index.values[a]}))
+  
+all_anova_p = pd.concat(all_anova_p).fillna(value=0)
+all_anova_p = all_anova_p.groupby(by=all_anova_p.index, axis=0).sum().transpose()
+all_anova_f = pd.concat(all_anova_f).fillna(value=0)
+all_anova_f = all_anova_f.groupby(by=all_anova_f.index, axis=0).sum().transpose()
+
+row = [0,10]
+locs = [0.6, 1.4, 2.6, 3.4, 4.6, 5.4, 6.6, 7.4, 8.6, 9.4]
+for a in range(8):
+  if a < 4: b,c = a,0
+  else: b,c = a-4,1
+  ax = plt.subplot2grid((17,4), (row[c]+2,b), rowspan=5)
+  ax_heat = plt.subplot2grid((17,4), (row[c]+1,b), rowspan=1)
+  anova = plt.subplot2grid((17,4), (row[c],b), rowspan=1)
+  ti = anova.set_title(antibiotics[a].replace('MLSB', 'MLS')+'\n', fontweight='bold')
+  this_pres = num_genes.copy(deep=True).loc[:, [antibiotics[a]]].transpose()
+  tx = anova.text(0.5, 1.05, '('+str(totals[antibiotics[a]])+' genes)', ha='center', va='bottom', fontsize=12, transform=anova.transAxes)
+  plt.sca(ax_heat)
+  #pc = plt.pcolor(this_pres, edgecolor='k', cmap='cividis', vmin=0, vmax=4)
+  m = mpl.cm.ScalarMappable(norm=mpl.colors.Normalize(vmin=0, vmax=4), cmap=mpl.cm.cividis)
+  xl = plt.xlim([0.2, 9.8])
+  yl = plt.ylim([0, 1])
+  for c in range(len(this_pres.columns)):
+    pb = plt.bar(locs[c], 1, width=0.8, edgecolor='k', color=m.to_rgba(this_pres.loc[antibiotics[a], this_pres.columns[c]]))
+  yt = plt.yticks([])
+  if a in [0, 4]: 
+    yl = ax_heat.text(-0.05, 0.5, 'Genes\ndetected', ha='right', va='center', transform=ax_heat.transAxes)
+    yl = ax.set_ylabel('Combined abundance relative\nto 16S rRNA gene (%)')
+    yl = anova.text(-0.05, 0.5, 'ANOVA', ha='right', va='center', transform=anova.transAxes)
+  xl = plt.xticks(locs, [], rotation=90, fontsize=8)
+  # this_ra = rel_abun.copy(deep=True).loc[[antibiotics[a]], :]
+  for n in range(len(this_pres.columns)):
+    num = this_pres.columns[n]
+    tx_col = 'w'
+    if this_pres.loc[antibiotics[a], num] > 2: tx_col = 'k'
+    tx = ax_heat.text(locs[n], 0.5, str(round(this_pres.loc[antibiotics[a], num])), color=tx_col, ha='center', va='center')
+    vals = list(rel_abun.loc[antibiotics[a], num].values)
+    if 'Antibiotic' in samples[num]: color = 'r'
+    else: color = 'k'
+    #sc = ax.scatter(np.random.normal(num, 0.1, 3), vals, color=color, alpha=0.7, s=15, edgecolor='k')
+    sc = ax.errorbar([locs[n]], [np.mean(vals)], yerr=[np.std(vals)], color=color, marker='o', markeredgecolor='k', capsize=2)
+  plt.sca(ax)
+  xl = plt.xticks(locs, [samples[x].replace('Antibiotics', '\nAntibiotics').replace(' control', '') for x in this_pres.columns], rotation=90, fontsize=8)
+  xl = plt.xlim([0.2, 9.8])
+  plt.sca(anova)
+  xt = plt.xticks([])
+  yt = plt.yticks([])
+  count = 0
+  for surf in ['Antibiotics', 'Surface', 'Surface:Antibiotics']:
+    text = surf.replace('Antibiotics', 'A').replace('Surface', 'S')+': F='
+    text += str(round(all_anova_f.loc[antibiotics[a], surf],2))+'\n$p$='
+    text += str(round(all_anova_p.loc[antibiotics[a], surf],4))
+    if all_anova_p.loc[antibiotics[a], surf] <= 0.05: color='r'
+    else: color='w'
+    tx = plt.barh(0.5, 1, left=count, edgecolor='k', height=1, color=color, alpha=0.3)
+    tx = plt.text(count+0.5, 0.5, text, ha='center', va='center', fontsize=9)
+    count += 1
+  xl = plt.xlim([0, 3])
+  yl = plt.ylim([0, 1])
+  
+plt.savefig(folder+'Fig5 grouped presence and abundance.png', dpi=600, bbox_inches='tight')
+```
+
+## Redo Figure 6
+
+```{python}
+plt.figure(figsize=(25,15))
+#ax1 = plt.subplot2grid((38,26),(0,0), rowspan=8,colspan=10) #number_of_genes
+#ax1b = plt.subplot2grid((38,26),(0,10), rowspan=8,colspan=3) #number_of_genes statistical tests
+ax2 = plt.subplot2grid((38,26),(8,0), colspan=10) #number_of_genes total
+ax3 = plt.subplot2grid((38,26),(10,0), rowspan=28, colspan=10) #abundance_all_genes
+ax3b = plt.subplot2grid((38,26),(10,10), rowspan=28, colspan=3) #abundance_all_genes statistical tests
+
+#plt.sca(ax1)
+# num_genes = pd.read_csv(folder+'Numbers_of_detected_genes.csv', index_col=0, header=0)
+# num_genes = num_genes.drop(['Description', 'Total number of detected genes'], axis=1).drop([11, 12], axis=0).transpose()
+# num_genes = num_genes.iloc[::-1]
+
+# ax1.pcolor(num_genes, edgecolor='k', cmap='cividis')
+# plt.yticks([x+0.5 for x in range(len(num_genes.index.values))], num_genes.index.values)
+# plt.xticks([])
+# plt.title('Number of ARGs detected', fontweight='bold'), plt.title('A', fontweight='bold', loc='left', fontsize=16)
+# 
+# for a in range(len(num_genes.index.values)):
+#   for b in range(len(num_genes.columns)):
+#     num = num_genes.iloc[a, b]
+#     if num < 4: col = 'w'
+#     else: col = 'k'
+#     ax1.text(b+0.5, a+0.5, str(num), color=col, ha='center', va='center')
+    
+#ax1.xaxis.tick_top()
+
+num_genes = pd.read_csv(folder+'Numbers_of_detected_genes.csv', index_col=0, header=0)
+num_genes = num_genes.drop(['Description', 'Aminoglycoside (2)', 'MDR (19)', 'MLSB (9)', 'Quinolone (1)', 'Sulfonamide (4)', 'Tetracycline (9)', 'Taxonomic (5)', 'Other (4)'], axis=1).drop([11, 12], axis=0).transpose()
+
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=0, header=0).fillna(value=0).drop(['gene', 'assay'], axis=1).drop(['16S rRNA'], axis=0)
+relative_abundances = relative_abundances.groupby(by=relative_abundances.index, axis=0).sum().loc[['Aminoglycoside', 'MDR', 'MLSB', 'Quinolone', 'Sulfonamide', 'Tetracycline', 'Other'], :]
+
+plt.sca(ax2)
+ax2.pcolor(num_genes, edgecolor='k', cmap='Reds')
+fs = 14
+#yt = plt.yticks([0.5], ['Total number of\ndetected genes'], fontsize=fs, fontweight='bold')
+xt = plt.xticks([])
+yt = plt.yticks([])
+ti = plt.title('Total number of detected genes', fontsize=fs, fontweight='bold')
+
+for b in range(len(num_genes.columns)):
+  num = num_genes.iloc[0, b]
+  if num < 9: col = 'k'
+  else: col = 'w'
+  ax2.text(b+0.5, 0.5, str(round(num)), color=col, ha='center', va='center')
+
+plt.sca(ax3)
+plt.xticks([x+0.5 for x in range(len(num_genes.columns))], [samples[x].replace(' control', '').replace('Antibiotics', '\nAntibiotics') for x in num_genes.columns], rotation=90)
+
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0).fillna(value=0).drop(['group', 'gene'], axis=1)
+comparisons = []
+comp_added = False
+all_anova_p, all_anova_f, all_tukeys_p = [], [], []
+
+rel_abun_rename = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0)
+ra_rename_dict = {}
+for row in rel_abun_rename.index.values:
+  if 'qacE_' in rel_abun_rename.loc[row, 'gene']:
+    ra_rename_dict[row] = rel_abun_rename.loc[row, 'group']+': '+rel_abun_rename.loc[row, 'gene'].replace('qacE_', r'qacE$\Delta$')
+  else:
+    ra_rename_dict[row] = rel_abun_rename.loc[row, 'group']+': '+rel_abun_rename.loc[row, 'gene']
+
+all_renamed = [ra_rename_dict[x] for x in relative_abundances.index.values]
+all_renamed = sorted(all_renamed)
+all_rename_no_other = [x for x in all_renamed if 'Other' not in x]
+all_rename_other = [x for x in all_renamed if 'Other' in x]
+all_renamed = all_rename_no_other+all_rename_other
+gene_order = []
+for gene in all_renamed:
+  for rename in ra_rename_dict:
+    if gene == ra_rename_dict[rename]:
+      gene_order.append(rename)
+
+relative_abundances = relative_abundances.loc[gene_order, :]
+
+for assay in relative_abundances.index.values:
+  #if assay != 'AY242': continue
+  anova = pd.read_csv(folder+'anova/'+assay+'_anova.csv', index_col=0, header=0)
+  this_anova_p, this_anova_f, tukeys_p = [], [], []
+  for row in anova.index.values:
+    if row == 'Residual': continue
+    this_anova_p.append(anova.loc[row, 'PR(>F)'])
+    this_anova_f.append(anova.loc[row, 'F'])
+  tukeys = pd.read_csv(folder+'anova/'+assay+'_tukeys_hsd.csv', header=0).drop('Unnamed: 0', axis=1)
+  for row in tukeys.index.values:
+    if not comp_added:
+      comparisons.append(tukeys.loc[row, 'group1']+' '+tukeys.loc[row, 'group2'])
+    tukeys_p.append(tukeys.loc[row, 'p-value'])
+  comp_added = True
+  all_anova_p.append(this_anova_p)
+  all_anova_f.append(this_anova_f)
+  all_tukeys_p.append(tukeys_p)
+
+all_anova_p = pd.DataFrame(all_anova_p, index=relative_abundances.index.values, columns=['Surface', 'Antibiotics', 'Surface:Antibiotics'])
+all_anova_f = pd.DataFrame(all_anova_f, index=relative_abundances.index.values, columns=['Surface', 'Antibiotics', 'Surface:Antibiotics'])
+all_tukeys_p = pd.DataFrame(all_tukeys_p, index=relative_abundances.index.values, columns=comparisons)
+
+relative_abundances = relative_abundances.iloc[::-1]
+rename_col = {}
+for col in relative_abundances.columns: rename_col[col] = col[:-1]
+relative_abundances = relative_abundances.rename(columns=rename_col)
+relative_abundances = relative_abundances.groupby(by=relative_abundances.columns, axis=1).mean()
+relative_abundances = relative_abundances.drop('AY1', axis=0).loc[:, ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10']]
+relative_abundances = relative_abundances[relative_abundances.max(axis=1) > 0]
+relative_abundances = relative_abundances*100
+ra_log = relative_abundances.copy(deep=True)
+ra_log = ra_log+min(ra_log[ra_log > .0].min(axis=1))/100
+ra_log = np.log10(ra_log)
+
+all_anova_p = all_anova_p.loc[relative_abundances.index.values, :]
+all_anova_f = all_anova_f.loc[relative_abundances.index.values, :]
+all_tukeys_p = all_tukeys_p.loc[relative_abundances.index.values, :]
+
+# rel_abun_rename = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0)
+# ra_rename_dict = {}
+# for row in rel_abun_rename.index.values:
+#   if 'qacE_' in rel_abun_rename.loc[row, 'gene']:
+#     ra_rename_dict[row] = rel_abun_rename.loc[row, 'gene'].replace('qacE_', r'qacE$\Delta$')+' ('+rel_abun_rename.loc[row, 'group']+')'
+#   else:
+#     ra_rename_dict[row] = rel_abun_rename.loc[row, 'gene']+' ('+rel_abun_rename.loc[row, 'group']+')'
+rel_abun_rename = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0)
+ra_rename_dict = {}
+for row in rel_abun_rename.index.values:
+  gene = rel_abun_rename.loc[row, 'gene']
+  group = rel_abun_rename.loc[row, 'group'].replace('MLSB', 'MLS')
+  if 'qacE_' in gene:
+    ra_rename_dict[row] = gene.replace('qacE_', '$qacE$'+r'$\Delta$')+' ('+group+')'
+  elif '_' in gene:
+    gene0, gene1 = gene.split('_', 1)
+    ra_rename_dict[row] = '$'+gene0+'$_'+gene1+' ('+group+')'
+  elif len(gene) < 6:
+    ra_rename_dict[row] = '$'+gene+'$ ('+group+')'
+  else:
+    ra_rename_dict[row] = gene+' ('+group+')'
+
+pc = ax3.pcolor(ra_log, edgecolor='k')
+
+for a in range(len(relative_abundances.index.values)):
+  for b in range(len(relative_abundances.columns)):
+    num = relative_abundances.iloc[a, b]
+    if num != 0: tx = ax3.text(b+0.5, a+0.5, str(round(num, 3)), ha='center', va='center')
+
+yt = plt.yticks([x+0.5 for x in range(len(relative_abundances.index.values))], [ra_rename_dict[x].replace('A. baumannii', '$A.$ $baumannii$') for x in relative_abundances.index.values])
+
+plt.sca(ax3b)
+all_anova_p[all_anova_p > 0.05] = 0.1
+pc = ax3b.pcolor(all_anova_p, edgecolor='k', cmap='hot_r')
+
+for a in range(len(all_anova_f.index.values)):
+  for b in range(len(all_anova_f.columns)):
+    num = all_anova_f.iloc[a, b]
+    if num != 0: tx = ax3b.text(b+0.5, a+0.5, 'F='+str(round(num, 2)), ha='center', va='center')#'F='+str(round(num, 2))+'\n$p$='+str(round(all_anova_p.loc[a,b],4)), ha='center', va='center')
+
+yt = plt.yticks([])
+xt = plt.xticks([x+0.5 for x in range(len(all_anova_p.columns))], all_anova_p.columns, rotation=90)
+
+ti = ax3.set_title('Abundance relative to 16S rRNA gene (%)', fontweight='bold', fontsize=fs)
+#ti = ax3.set_title('B', fontweight='bold', loc='left', fontsize=16)
+ti = ax3b.set_title('Two factor ANOVA', fontweight='bold', fontsize=fs)
+  
+plt.savefig(folder+'Fig6 individual genes.png', bbox_inches='tight', dpi=600)
+```
+
+## Redo combined Fig 5 and Fig 6
+
+```{python}
+fig = plt.figure(figsize=(15,25))
+antibiotics = ['Aminoglycoside', 'MDR', 'MLSB', 'Quinolone', 'Sulfonamide', 'Taxonomic', 'Tetracycline', 'Other']
+
+num_genes = pd.read_csv(folder+'Numbers_of_detected_genes.csv', index_col=0, header=0).drop([11, 12], axis=0).drop(['Description', 'Total number of detected genes'], axis=1)
+names, totals = {},{}
+for col in num_genes.columns:
+  names[col] = col.split(' ')[0]
+  totals[col.split(' ')[0]] = col.split('(')[1].replace(')', '')
+num_genes = num_genes.rename(columns=names)
+
+rel_abun = pd.read_csv(folder+'Relative_abundances.csv', index_col=0, header=0).fillna(value=0).drop(['gene', 'assay'], axis=1)*100
+rel_abun = rel_abun.groupby(by=rel_abun.index, axis=0).sum()
+rename_samples = {}
+for col in rel_abun.columns:
+  rename_samples[col] = int(col[:-1])
+rel_abun = rel_abun.rename(columns=rename_samples)
+
+all_anova_f, all_anova_p = [], []
+for a in range(len(rel_abun.index.values)):
+  anova = pd.read_csv(folder+'anova/'+rel_abun.index.values[a]+'_anova.csv', index_col=0, header=0)
+  anova_p, anova_f = [], []
+  for row in anova.index.values:
+    if row == 'Residual': continue
+    anova_p.append(anova.loc[row, 'PR(>F)'])
+    anova_f.append(anova.loc[row, 'F'])
+  anova_p = pd.DataFrame([anova_p], columns=['S', 'A', 'S:A']).transpose()
+  anova_p = anova_p.iloc[::-1]
+  anova_f = pd.DataFrame([anova_f], columns=['S', 'A', 'S:A']).transpose()
+  anova_f = anova_f.iloc[::-1]
+  all_anova_p.append(anova_p.rename(columns={0:rel_abun.index.values[a]}))
+  all_anova_f.append(anova_f.rename(columns={0:rel_abun.index.values[a]}))
+
+all_anova_p = pd.concat(all_anova_p).fillna(value=0)
+all_anova_p = all_anova_p.groupby(by=all_anova_p.index, axis=0).sum().transpose()
+all_anova_f = pd.concat(all_anova_f).fillna(value=0)
+all_anova_f = all_anova_f.groupby(by=all_anova_f.index, axis=0).sum().transpose()
+
+row = [0,10]
+locs = [0.6, 1.4, 2.6, 3.4, 4.6, 5.4, 6.6, 7.4, 8.6, 9.4]
+locs_lines = [0.2, 1, 1.8, 2.2, 3, 3.8, 4.2, 5, 5.8, 6.2, 7, 7.8, 8.2, 9]
+for a in range(8):
+  if a < 4: b,c = a,0
+  else: b,c = a-4,1
+  ax = plt.subplot2grid((51,4), (row[c]+2,b), rowspan=5)
+  ax_heat = plt.subplot2grid((51,4), (row[c]+1,b), rowspan=1)
+  anova = plt.subplot2grid((51,4), (row[c],b), rowspan=1)
+  ti = anova.set_title(antibiotics[a].replace('MLSB', 'MLS')+'\n', fontweight='bold')
+  this_pres = num_genes.copy(deep=True).loc[:, [antibiotics[a]]].transpose()
+  tx = anova.text(0.5, 1.1, '('+str(totals[antibiotics[a]])+' genes)', ha='center', va='bottom', fontsize=12, transform=anova.transAxes)
+  plt.sca(ax_heat)
+  #pc = plt.pcolor(this_pres, edgecolor='k', cmap='cividis', vmin=0, vmax=4)
+  m = mpl.cm.ScalarMappable(norm=mpl.colors.Normalize(vmin=0, vmax=4), cmap=mpl.cm.cividis)
+  xl = plt.xlim([0.2, 9.8])
+  yl = plt.ylim([0, 1])
+  for c in range(len(this_pres.columns)):
+    pb = plt.bar(locs[c], 1, width=0.8, edgecolor='k', color=m.to_rgba(this_pres.loc[antibiotics[a], this_pres.columns[c]]))
+  yt = plt.yticks([])
+  if a in [0, 4]:
+    yl = ax_heat.text(-0.05, 0.5, 'Genes\ndetected', ha='right', va='center', transform=ax_heat.transAxes)
+    yl = ax.set_ylabel('Combined abundance\nrelative to\n16S rRNA gene (%)')
+    yl = anova.text(-0.05, 0.5, 'ANOVA', ha='right', va='center', transform=anova.transAxes)
+  xl = plt.xticks(locs, [], rotation=90, fontsize=8)
+  # this_ra = rel_abun.copy(deep=True).loc[[antibiotics[a]], :]
+  for n in range(len(this_pres.columns)):
+    num = this_pres.columns[n]
+    tx_col = 'w'
+    if this_pres.loc[antibiotics[a], num] > 2: tx_col = 'k'
+    tx = ax_heat.text(locs[n], 0.5, str(round(this_pres.loc[antibiotics[a], num])), color=tx_col, ha='center', va='center')
+    vals = list(rel_abun.loc[antibiotics[a], num].values)
+    if 'Antibiotic' in samples[num]: color = 'r'
+    else: color = 'k'
+    #sc = ax.scatter(np.random.normal(num, 0.1, 3), vals, color=color, alpha=0.7, s=15, edgecolor='k')
+    sc = ax.errorbar([locs[n]], [np.mean(vals)], yerr=[np.std(vals)], color=color, marker='o', markeredgecolor='k', capsize=2)
+  bottom, top = ax.get_ylim()
+  for l in range(len(locs_lines)):
+    li = ax.plot([locs_lines[l], locs_lines[l]], [bottom, top], 'k--', alpha=0.2, lw=1)
+  plt.sca(ax)
+  xl = plt.xticks(locs, [samples[x].replace('A', '\nA').replace(' control', '') for x in this_pres.columns], rotation=90, fontsize=8)
+  xl = plt.xlim([0.2, 9.8])
+  plt.sca(anova)
+  xt = plt.xticks([])
+  yt = plt.yticks([])
+  count = 0
+  for surf in ['A', 'S', 'S:A']:
+    text = surf+': F='
+    text += str(round(all_anova_f.loc[antibiotics[a], surf],2))+'\n$p$='
+    text += str(round(all_anova_p.loc[antibiotics[a], surf],4))
+    if all_anova_p.loc[antibiotics[a], surf] <= 0.05: color='r'
+    else: color='w'
+    tx = plt.barh(0.5, 1, left=count, edgecolor='k', height=1, color=color, alpha=0.3)
+    tx = plt.text(count+0.5, 0.4, text, ha='center', va='center', fontsize=8)
+    count += 1
+  xl = plt.xlim([0, 3])
+  yl = plt.ylim([0, 1])
+
+ax2 = plt.subplot2grid((51,13),(22,0), colspan=10) #number_of_genes total
+ax3 = plt.subplot2grid((51,13),(24,0), rowspan=20, colspan=10) #abundance_all_genes
+ax3b = plt.subplot2grid((51,13),(24,10), rowspan=20, colspan=3) #abundance_all_genes statistical tests
+
+num_genes = pd.read_csv(folder+'Numbers_of_detected_genes.csv', index_col=0, header=0)
+num_genes = num_genes.drop(['Description', 'Aminoglycoside (2)', 'MDR (19)', 'MLSB (9)', 'Quinolone (1)', 'Sulfonamide (4)', 'Tetracycline (9)', 'Taxonomic (5)', 'Other (4)'], axis=1).drop([11, 12], axis=0).transpose()
+
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=0, header=0).fillna(value=0).drop(['gene', 'assay'], axis=1).drop(['16S rRNA'], axis=0)
+relative_abundances = relative_abundances.groupby(by=relative_abundances.index, axis=0).sum().loc[['Aminoglycoside', 'MDR', 'MLSB', 'Quinolone', 'Sulfonamide', 'Tetracycline', 'Other'], :]
+
+plt.sca(ax2)
+ax2.pcolor(num_genes, edgecolor='k', cmap='Reds')
+fs = 14
+xt = plt.xticks([])
+yt = plt.yticks([])
+ti = plt.title('Total number of detected genes', fontsize=fs, fontweight='bold')
+
+for b in range(len(num_genes.columns)):
+  num = num_genes.iloc[0, b]
+  if num < 9: col = 'k'
+  else: col = 'w'
+  ax2.text(b+0.5, 0.4, str(round(num)), color=col, ha='center', va='center')
+
+plt.sca(ax3)
+plt.xticks([x+0.5 for x in range(len(num_genes.columns))], [samples[x].replace(' control', '').replace('A', '\nA') for x in num_genes.columns], rotation=90)
+
+relative_abundances = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0).fillna(value=0).drop(['group', 'gene'], axis=1)
+comparisons = []
+comp_added = False
+all_anova_p, all_anova_f, all_tukeys_p = [], [], []
+
+rel_abun_rename = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0)
+ra_rename_dict = {}
+for row in rel_abun_rename.index.values:
+  if 'qacE_' in rel_abun_rename.loc[row, 'gene']:
+    ra_rename_dict[row] = rel_abun_rename.loc[row, 'group']+': '+rel_abun_rename.loc[row, 'gene'].replace('qacE_', r'qacE$\Delta$')
+  else:
+    ra_rename_dict[row] = rel_abun_rename.loc[row, 'group']+': '+rel_abun_rename.loc[row, 'gene']
+
+all_renamed = [ra_rename_dict[x] for x in relative_abundances.index.values]
+all_renamed = sorted(all_renamed)
+all_rename_no_other = [x for x in all_renamed if 'Other' not in x]
+all_rename_other = [x for x in all_renamed if 'Other' in x]
+all_renamed = all_rename_no_other+all_rename_other
+gene_order = []
+for gene in all_renamed:
+  for rename in ra_rename_dict:
+    if gene == ra_rename_dict[rename]:
+      gene_order.append(rename)
+
+relative_abundances = relative_abundances.loc[gene_order, :]
+
+for assay in relative_abundances.index.values:
+  #if assay != 'AY242': continue
+  anova = pd.read_csv(folder+'anova/'+assay+'_anova.csv', index_col=0, header=0)
+  this_anova_p, this_anova_f, tukeys_p = [], [], []
+  for row in anova.index.values:
+    if row == 'Residual': continue
+    this_anova_p.append(anova.loc[row, 'PR(>F)'])
+    this_anova_f.append(anova.loc[row, 'F'])
+  tukeys = pd.read_csv(folder+'anova/'+assay+'_tukeys_hsd.csv', header=0).drop('Unnamed: 0', axis=1)
+  for row in tukeys.index.values:
+    if not comp_added:
+      comparisons.append(tukeys.loc[row, 'group1']+' '+tukeys.loc[row, 'group2'])
+    tukeys_p.append(tukeys.loc[row, 'p-value'])
+  comp_added = True
+  all_anova_p.append(this_anova_p)
+  all_anova_f.append(this_anova_f)
+  all_tukeys_p.append(tukeys_p)
+
+all_anova_p = pd.DataFrame(all_anova_p, index=relative_abundances.index.values, columns=['S', 'A', 'S:A'])
+all_anova_f = pd.DataFrame(all_anova_f, index=relative_abundances.index.values, columns=['S', 'A', 'S:A'])
+all_tukeys_p = pd.DataFrame(all_tukeys_p, index=relative_abundances.index.values, columns=comparisons)
+
+relative_abundances = relative_abundances.iloc[::-1]
+rename_col = {}
+for col in relative_abundances.columns: rename_col[col] = col[:-1]
+relative_abundances = relative_abundances.rename(columns=rename_col)
+relative_abundances = relative_abundances.groupby(by=relative_abundances.columns, axis=1).mean()
+relative_abundances = relative_abundances.drop('AY1', axis=0).loc[:, ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10']]
+relative_abundances = relative_abundances[relative_abundances.max(axis=1) > 0]
+relative_abundances = relative_abundances*100
+ra_log = relative_abundances.copy(deep=True)
+ra_log = ra_log+min(ra_log[ra_log > .0].min(axis=1))/100
+ra_log = np.log10(ra_log)
+
+all_anova_p = all_anova_p.loc[relative_abundances.index.values, :]
+all_anova_f = all_anova_f.loc[relative_abundances.index.values, :]
+all_tukeys_p = all_tukeys_p.loc[relative_abundances.index.values, :]
+
+rel_abun_rename = pd.read_csv(folder+'Relative_abundances.csv', index_col=2, header=0)
+ra_rename_dict = {}
+for row in rel_abun_rename.index.values:
+  gene = rel_abun_rename.loc[row, 'gene']
+  group = rel_abun_rename.loc[row, 'group'].replace('MLSB', 'MLS')
+  if 'qacE_' in gene:
+    ra_rename_dict[row] = gene.replace('qacE_', '$qacE$'+r'$\Delta$')+' ('+group+')'
+  elif '_' in gene:
+    gene0, gene1 = gene.split('_', 1)
+    ra_rename_dict[row] = '$'+gene0+'$_'+gene1+' ('+group+')'
+  elif len(gene) < 6:
+    ra_rename_dict[row] = '$'+gene+'$ ('+group+')'
+  else:
+    ra_rename_dict[row] = gene+' ('+group+')'
+
+pc = ax3.pcolor(ra_log, edgecolor='k')
+
+for a in range(len(relative_abundances.index.values)):
+  for b in range(len(relative_abundances.columns)):
+    num = relative_abundances.iloc[a, b]
+    if num != 0: tx = ax3.text(b+0.5, a+0.5, str(round(num, 3)), ha='center', va='center')
+
+ylabels = [ra_rename_dict[x].replace('A. baumannii', '$A.$ $baumannii$') for x in relative_abundances.index.values]
+yt = plt.yticks([x+0.5 for x in range(len(relative_abundances.index.values))], ylabels)
+
+plt.sca(ax3b)
+all_anova_p[all_anova_p > 0.05] = 0.1
+pc = ax3b.pcolor(all_anova_p, edgecolor='k', cmap='hot_r')
+
+for a in range(len(all_anova_f.index.values)):
+  for b in range(len(all_anova_f.columns)):
+    num = all_anova_f.iloc[a, b]
+    if num != 0: tx = ax3b.text(b+0.5, a+0.5, 'F='+str(round(num, 2)), ha='center', va='center')#'F='+str(round(num, 2))+'\n$p$='+str(round(all_anova_p.loc[a,b],4)), ha='center', va='center')
+
+yt = plt.yticks([])
+xt = plt.xticks([x+0.5 for x in range(len(all_anova_p.columns))], all_anova_p.columns, rotation=90)
+
+ti = ax3.set_title('Abundance relative to 16S rRNA gene (%)', fontweight='bold', fontsize=fs)
+ti = ax3b.set_title('Two factor ANOVA', fontweight='bold', fontsize=fs)
+tx = ax3.text(-0.1, 2.25, 'A', fontweight='bold', transform=ax3.transAxes, fontsize=16)
+tx = ax3.text(-0.1, 1.15, 'B', fontweight='bold', transform=ax3.transAxes, fontsize=16)
+
+plt.savefig(folder+'Fig5_6_combined.png', bbox_inches='tight')
+```
+
